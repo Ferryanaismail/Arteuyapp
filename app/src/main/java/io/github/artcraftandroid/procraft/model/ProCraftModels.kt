@@ -266,6 +266,7 @@ data class GestureSettings(
     val palmRejection: Boolean = false,
     val strokeSoundEnabled: Boolean = false,
     val zoomHudEnabled: Boolean = true,
+    val fakePressureEnabled: Boolean = false,
     val colorDropThreshold: Float = 0.25f,
     val sideBarScale: Float = 1.0f,
     val sideBarVerticalBias: Float = 0.5f,

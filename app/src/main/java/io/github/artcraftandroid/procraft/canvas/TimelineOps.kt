@@ -1120,6 +1120,38 @@ fun CanvasViewModel.insertLayerOrderKeyframe(
 }
 
 fun CanvasViewModel.createGroupTrack(targetTrackId: String? = animationState.selectedTrackId) {
+    val selectedIds = animationState.selectedTrackIds
+    if (selectedIds.isNotEmpty()) {
+        val idsToGroup = if (targetTrackId != null) selectedIds + targetTrackId else selectedIds
+        val candidates = timelineTracks.filter { it.id in idsToGroup && it.kind != TrackKind.GROUP }
+        if (candidates.isNotEmpty()) {
+            val groupId = UUID.randomUUID().toString()
+            val groupCount = timelineTracks.count { it.kind == TrackKind.GROUP } + 1
+            val groupTrack = TimelineTrack(
+                id = groupId,
+                name = "Group $groupCount",
+                kind = TrackKind.GROUP,
+                colorLabel = candidates.first().colorLabel,
+                expanded = true,
+            )
+            val candidateIds = candidates.map { it.id }.toSet()
+            val firstIdx = timelineTracks.indexOfFirst { it.id in candidateIds }.coerceAtLeast(0)
+            val remaining = timelineTracks.filterNot { it.id in candidateIds }.toMutableList()
+            val groupedChildren = candidates.map { it.copy(groupId = groupId) }
+            val insertIdx = firstIdx.coerceIn(0, remaining.size)
+            remaining.add(insertIdx, groupTrack)
+            remaining.addAll(insertIdx + 1, groupedChildren)
+            timelineTracks = remaining
+            syncPaintLayersZOrder(remaining)
+            animationState = animationState.copy(selectedTrackId = groupId, selectedTrackIds = emptySet())
+            rebuildTimelineRenderState()
+            recomposite()
+            persistCurrentArtwork()
+            showNotice("Grouped ${candidates.size} tracks")
+            return
+        }
+    }
+
     val groupId = UUID.randomUUID().toString()
     val groupCount = timelineTracks.count { it.kind == TrackKind.GROUP } + 1
     val targetIdx = targetTrackId?.let { id -> timelineTracks.indexOfFirst { it.id == id } } ?: 0
@@ -1141,7 +1173,8 @@ fun CanvasViewModel.createGroupTrack(targetTrackId: String? = animationState.sel
         mutable.add(0, groupTrack)
     }
     timelineTracks = mutable
-    animationState = animationState.copy(selectedTrackId = groupId)
+    syncPaintLayersZOrder(mutable)
+    animationState = animationState.copy(selectedTrackId = groupId, selectedTrackIds = emptySet())
     rebuildTimelineRenderState()
     recomposite()
     persistCurrentArtwork()
@@ -1149,6 +1182,33 @@ fun CanvasViewModel.createGroupTrack(targetTrackId: String? = animationState.sel
 }
 
 fun CanvasViewModel.assignTrackToGroup(trackId: String, groupId: String?) {
+    val selectedIds = animationState.selectedTrackIds
+    if (selectedIds.isNotEmpty() && (trackId in selectedIds || selectedIds.size >= 2)) {
+        val idsToMove = (selectedIds + trackId)
+        val candidates = timelineTracks.filter { it.id in idsToMove && it.kind != TrackKind.GROUP && it.id != groupId }
+        if (candidates.isNotEmpty()) {
+            val candidateIds = candidates.map { it.id }.toSet()
+            val firstIdx = timelineTracks.indexOfFirst { it.id in candidateIds }.coerceAtLeast(0)
+            val remaining = timelineTracks.filterNot { it.id in candidateIds }.toMutableList()
+            val updatedChildren = candidates.map { it.copy(groupId = groupId) }
+            val insertAt = if (groupId != null) {
+                val gIdx = remaining.indexOfFirst { it.id == groupId }
+                if (gIdx >= 0) gIdx + 1 else firstIdx.coerceAtMost(remaining.size)
+            } else {
+                firstIdx.coerceAtMost(remaining.size)
+            }
+            remaining.addAll(insertAt, updatedChildren)
+            timelineTracks = remaining
+            syncPaintLayersZOrder(remaining)
+            animationState = animationState.copy(selectedTrackIds = emptySet())
+            rebuildTimelineRenderState()
+            recomposite()
+            persistCurrentArtwork()
+            showNotice(if (groupId != null) "Added ${candidates.size} tracks to group" else "Removed ${candidates.size} tracks from group")
+            return
+        }
+    }
+
     val trIdx = timelineTracks.indexOfFirst { it.id == trackId }
     if (trIdx < 0) return
     val tr = timelineTracks[trIdx]
@@ -1168,6 +1228,7 @@ fun CanvasViewModel.assignTrackToGroup(trackId: String, groupId: String?) {
         mutable.add(trIdx.coerceAtMost(mutable.size), updated)
     }
     timelineTracks = mutable
+    syncPaintLayersZOrder(mutable)
     rebuildTimelineRenderState()
     recomposite()
     persistCurrentArtwork()

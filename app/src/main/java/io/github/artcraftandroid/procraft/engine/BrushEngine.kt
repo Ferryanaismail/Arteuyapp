@@ -29,6 +29,7 @@ class BrushStrokeSession(
     val selectionMask: ByteArray?,
     val targetBitmap: Bitmap,
     private val baseLayerSnapshot: Bitmap? = null,
+    private val fakePressureActive: Boolean = false,
     private val onBeforeModifyRect: ((Float, Float, Float, Float) -> Unit)? = null,
 ) {
     private val rawPoints = mutableListOf<StrokePoint>()
@@ -441,8 +442,9 @@ class BrushStrokeSession(
 
     private fun drawStamp(x: Float, y: Float, pressure: Float, taper: Float) {
         val pFactor = pressure.coerceIn(0.1f, 1f)
+        val effPressureSize = if (fakePressureActive) max(brush.pressureSize, 0.72f) else brush.pressureSize
         val jitterScale = if (brush.jitter > 0f) 1f + (rng.nextFloat() - 0.5f) * brush.jitter else 1f
-        val r = (maxRadiusPx * (1f - brush.pressureSize * (1f - pFactor)) * taper * jitterScale).coerceAtLeast(1f)
+        val r = (maxRadiusPx * (1f - effPressureSize * (1f - pFactor)) * taper * jitterScale).coerceAtLeast(1f)
         val scatterOffset = if (brush.scatter > 0f) maxRadiusPx * 1.4f * brush.scatter else 0f
         val sx = x + (rng.nextFloat() - 0.5f) * 2f * scatterOffset
         val sy = y + (rng.nextFloat() - 0.5f) * 2f * scatterOffset

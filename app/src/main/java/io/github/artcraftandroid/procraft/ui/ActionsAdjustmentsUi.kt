@@ -428,6 +428,16 @@ fun ActionsPopover(
                         ) { show ->
                             vm.updateGestureSettings { it.copy(zoomHudEnabled = show) }
                         }
+                        PcRowDivider(indent = 42.dp)
+                        PcToggleRow(
+                            label = "Fake pressure sensitivity",
+                            subtitle = "Vary stroke width by drawing speed",
+                            icon = LucideIcons.StudioStylus,
+                            checked = vm.gestureSettings.fakePressureEnabled,
+                            testTag = "prefs_fake_pressure_switch",
+                        ) { enabled ->
+                            vm.updateGestureSettings { it.copy(fakePressureEnabled = enabled) }
+                        }
                     }
                     PcSectionCard("Brush & Opacity Sliders") {
                         val scalePct = (vm.gestureSettings.sideBarScale.coerceIn(0.45f, 1.0f) * 100f).roundToInt()

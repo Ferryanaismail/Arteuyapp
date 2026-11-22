@@ -937,7 +937,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun activeLayer(): LayerState? = layers.getOrNull(activeLayerIndex)
 
-    fun startStroke(canvasPos: Offset, pressure: Float, tilt: Float) {
+    fun startStroke(canvasPos: Offset, pressure: Float, tilt: Float, fakePressureActive: Boolean = false) {
         val art = currentArtwork ?: return
         if (animationState.isAnimation) {
             ensurePaintKeyframeAtCurrentFrame()
@@ -982,6 +982,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             selectionMask = mask,
             targetBitmap = layer.bitmap,
             baseLayerSnapshot = null,
+            fakePressureActive = fakePressureActive,
             onBeforeModifyRect = { l, t, r, b -> recorder.captureRect(l, t, r, b) },
         )
         session.start(StrokePoint(canvasPos.x, canvasPos.y, pressure, tilt))

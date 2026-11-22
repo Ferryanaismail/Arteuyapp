@@ -1010,6 +1010,13 @@ private fun GestureCategoryPane(
                         checked = s.brushCursor,
                         icon = LucideIcons.ModeDisc,
                     ) { v -> vm.updateGestureSettings { it.copy(brushCursor = v) } }
+                    PcRowDivider()
+                    PcToggleRow(
+                        label = "Fake Pressure Sensitivity",
+                        subtitle = "Simulate pen pressure from touch speed",
+                        checked = s.fakePressureEnabled,
+                        icon = LucideIcons.StudioDynamics,
+                    ) { v -> vm.updateGestureSettings { it.copy(fakePressureEnabled = v) } }
                 }
             }
 

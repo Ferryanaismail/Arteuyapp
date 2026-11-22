@@ -96,6 +96,9 @@ fun PaintingCanvas(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                     var quickShapeTriggered = false
                     var eyedropperJob: kotlinx.coroutines.Job? = null
                     var eyedropperActive = false
+                    var fakePressureSmoothed = 0.72f
+                    var prevFakeScreenPos = Offset.Zero
+                    var prevFakeTimeMs = 0L
                     val pointBatch = ArrayList<StrokePoint>(16)
 
                     while (true) {
@@ -262,12 +265,15 @@ fun PaintingCanvas(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                         val canvasPos = screenAreaToCanvas(vm, screenPos)
                         val isDownEdge = !ch.previousPressed && ch.pressed
 
-                        if (isDownEdge && (vm.sideBarMoveMode || vm.timelineClipHandlesId != null)) {
+                        if (isDownEdge && (vm.sideBarMoveMode || vm.timelineClipHandlesId != null || vm.animationState.selectedTrackIds.isNotEmpty())) {
                             if (vm.sideBarMoveMode) {
                                 vm.sideBarMoveMode = false
                                 vm.showNotice("Sidebar position saved")
                             }
                             vm.timelineClipHandlesId = null
+                            if (vm.animationState.selectedTrackIds.isNotEmpty()) {
+                                vm.clearMultiTrackSelection()
+                            }
                             dismissOnlyGesture = true
                             ch.consume()
                             continue
@@ -453,14 +459,19 @@ fun PaintingCanvas(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                         }
 
                         // Standard Painting / Smudging / Erasing / Liquify / Clone
-                        val pressure = if (ch.type == PointerType.Stylus) ch.pressure.coerceIn(0.05f, 1f) else 0.85f
+                        val useFakePressure = vm.gestureSettings.fakePressureEnabled && ch.type != PointerType.Stylus
+                        val basePressure = if (ch.type == PointerType.Stylus) ch.pressure.coerceIn(0.05f, 1f) else 0.85f
                         if (isDownEdge) {
                             drawingActive = true
                             quickShapeTriggered = false
                             prevStrokeCanvasPos = canvasPos
                             lastQuickShapeCheckPos = canvasPos
                             lastMoveMs = System.currentTimeMillis()
-                            vm.startStroke(canvasPos, pressure, 0f)
+                            fakePressureSmoothed = 0.72f
+                            prevFakeScreenPos = screenPos
+                            prevFakeTimeMs = ch.uptimeMillis
+                            val startP = if (useFakePressure) fakePressureSmoothed else basePressure
+                            vm.startStroke(canvasPos, startP, 0f, fakePressureActive = useFakePressure)
 
                             // Eyedropper touch & hold timer
                             eyedropperJob?.cancel()
@@ -503,10 +514,37 @@ fun PaintingCanvas(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                             pointBatch.clear()
                             val hist = ch.historical
                             for (i in hist.indices) {
-                                val hp = screenAreaToCanvas(vm, hist[i].position)
-                                pointBatch.add(StrokePoint(hp.x, hp.y, pressure, 0f, hist[i].uptimeMillis))
+                                val hScreen = hist[i].position
+                                val hp = screenAreaToCanvas(vm, hScreen)
+                                val pVal = if (useFakePressure) {
+                                    val distPx = hypot(hScreen.x - prevFakeScreenPos.x, hScreen.y - prevFakeScreenPos.y)
+                                    val dt = (hist[i].uptimeMillis - prevFakeTimeMs).coerceAtLeast(4L)
+                                    val speed = distPx / dt.toFloat()
+                                    val normFast = ((speed - 0.18f) / 2.8f).coerceIn(0f, 1f)
+                                    val targetP = (0.98f - normFast * 0.80f).coerceIn(0.16f, 1f)
+                                    fakePressureSmoothed = fakePressureSmoothed * 0.72f + targetP * 0.28f
+                                    prevFakeScreenPos = hScreen
+                                    prevFakeTimeMs = hist[i].uptimeMillis
+                                    fakePressureSmoothed
+                                } else {
+                                    basePressure
+                                }
+                                pointBatch.add(StrokePoint(hp.x, hp.y, pVal, 0f, hist[i].uptimeMillis))
                             }
-                            pointBatch.add(StrokePoint(canvasPos.x, canvasPos.y, pressure, 0f, ch.uptimeMillis))
+                            val finalP = if (useFakePressure) {
+                                val distPx = hypot(screenPos.x - prevFakeScreenPos.x, screenPos.y - prevFakeScreenPos.y)
+                                val dt = (ch.uptimeMillis - prevFakeTimeMs).coerceAtLeast(4L)
+                                val speed = distPx / dt.toFloat()
+                                val normFast = ((speed - 0.18f) / 2.8f).coerceIn(0f, 1f)
+                                val targetP = (0.98f - normFast * 0.80f).coerceIn(0.16f, 1f)
+                                fakePressureSmoothed = fakePressureSmoothed * 0.72f + targetP * 0.28f
+                                prevFakeScreenPos = screenPos
+                                prevFakeTimeMs = ch.uptimeMillis
+                                fakePressureSmoothed
+                            } else {
+                                basePressure
+                            }
+                            pointBatch.add(StrokePoint(canvasPos.x, canvasPos.y, finalP, 0f, ch.uptimeMillis))
                             vm.moveStrokeBatch(pointBatch, prevStrokeCanvasPos)
                             prevStrokeCanvasPos = canvasPos
                         }

@@ -25,6 +25,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
@@ -38,6 +39,7 @@ import io.github.artcraftandroid.procraft.engine.BrushLibraryCatalog
 import io.github.artcraftandroid.procraft.engine.BrushStrokeSession
 import io.github.artcraftandroid.procraft.engine.StrokePoint
 import io.github.artcraftandroid.procraft.model.*
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 private enum class StudioSection(val label: String) {
@@ -56,6 +58,7 @@ private enum class StudioSection(val label: String) {
 fun BrushStudioModal(
     preset: BrushPreset,
     colorRgb: Int,
+    fakePressureEnabled: Boolean = false,
     onUpdate: (BrushPreset) -> Unit,
     onDeleteCustom: (() -> Unit)? = null,
     onImportAbr: (() -> Unit)? = null,
@@ -183,6 +186,7 @@ fun BrushStudioModal(
                         DrawingPadPane(
                             draft = draft,
                             colorRgb = colorRgb,
+                            fakePressureEnabled = fakePressureEnabled,
                             padBitmap = padBitmap,
                             padImg = padImg,
                             onStrokeStep = { padTick++ },
@@ -197,6 +201,7 @@ fun BrushStudioModal(
                         DrawingPadPane(
                             draft = draft,
                             colorRgb = colorRgb,
+                            fakePressureEnabled = fakePressureEnabled,
                             padBitmap = padBitmap,
                             padImg = padImg,
                             onStrokeStep = { padTick++ },
@@ -290,6 +295,7 @@ private fun StudioCategoryRail(
 private fun DrawingPadPane(
     draft: BrushPreset,
     colorRgb: Int,
+    fakePressureEnabled: Boolean,
     padBitmap: Bitmap,
     padImg: androidx.compose.ui.graphics.ImageBitmap,
     onStrokeStep: () -> Unit,
@@ -297,6 +303,12 @@ private fun DrawingPadPane(
     onPreviewSizeChange: (Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val effectivePadColor = remember(colorRgb) {
+        val r = android.graphics.Color.red(colorRgb)
+        val g = android.graphics.Color.green(colorRgb)
+        val b = android.graphics.Color.blue(colorRgb)
+        if (r > 235 && g > 235 && b > 235) 0xFF1C1C1E.toInt() else colorRgb
+    }
     Column(
         modifier
             .clip(RoundedCornerShape(12.dp))
@@ -317,7 +329,7 @@ private fun DrawingPadPane(
                     Modifier
                         .size(16.dp)
                         .clip(CircleShape)
-                        .background(CanvasSpace.color(colorRgb))
+                        .background(CanvasSpace.color(effectivePadColor))
                         .border(1.dp, Color(0x66FFFFFF), CircleShape),
                 )
                 Text("Drawing Pad", color = Color(0xFFEAEAEF), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
@@ -335,21 +347,27 @@ private fun DrawingPadPane(
         }
         HorizontalDivider(color = Color(0x1FFFFFFF), thickness = 0.6.dp)
 
-        // Pad surface
+        // Pad surface (pure white background for accurate brush testing)
         Box(
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .pointerInput(draft.settings) {
+                .background(Color.White)
+                .testTag("brush_studio_drawing_pad")
+                .pointerInput(draft.settings, effectivePadColor, fakePressureEnabled) {
                     var session: BrushStrokeSession? = null
                     awaitEachGesture {
                         val down = awaitFirstDown()
+                        val useFake = fakePressureEnabled && down.type != PointerType.Stylus
+                        var fakeP = 0.72f
+                        var prevScreen = down.position
+                        var prevMs = down.uptimeMillis
                         val sx = down.position.x / size.width.coerceAtLeast(1) * padBitmap.width
                         val sy = down.position.y / size.height.coerceAtLeast(1) * padBitmap.height
                         session = BrushStrokeSession(
                             tool = ToolKind.PAINT,
                             brush = draft.settings,
-                            colorRgb = colorRgb,
+                            colorRgb = effectivePadColor,
                             canvasWidth = padBitmap.width,
                             canvasHeight = padBitmap.height,
                             alphaLock = false,
@@ -357,7 +375,11 @@ private fun DrawingPadPane(
                             selectionMask = null,
                             targetBitmap = padBitmap,
                             baseLayerSnapshot = null,
-                        ).apply { start(StrokePoint(sx, sy, 0.85f)) }
+                            fakePressureActive = useFake,
+                        ).apply {
+                            val p0 = if (useFake) fakeP else if (down.type == PointerType.Stylus) down.pressure.coerceIn(0.1f, 1f) else 0.85f
+                            start(StrokePoint(sx, sy, p0))
+                        }
                         onStrokeStep()
                         while (true) {
                             val ev = awaitPointerEvent()
@@ -369,7 +391,21 @@ private fun DrawingPadPane(
                             }
                             val mx = ch.position.x / size.width.coerceAtLeast(1) * padBitmap.width
                             val my = ch.position.y / size.height.coerceAtLeast(1) * padBitmap.height
-                            session?.move(StrokePoint(mx, my, ch.pressure.coerceIn(0.15f, 1f)))
+                            val pVal = if (useFake) {
+                                val dist = hypot(ch.position.x - prevScreen.x, ch.position.y - prevScreen.y)
+                                val dt = (ch.uptimeMillis - prevMs).coerceAtLeast(4L)
+                                val normFast = ((dist / dt.toFloat() - 0.18f) / 2.8f).coerceIn(0f, 1f)
+                                val target = (0.98f - normFast * 0.80f).coerceIn(0.16f, 1f)
+                                fakeP = fakeP * 0.72f + target * 0.28f
+                                prevScreen = ch.position
+                                prevMs = ch.uptimeMillis
+                                fakeP
+                            } else if (ch.type == PointerType.Stylus) {
+                                ch.pressure.coerceIn(0.15f, 1f)
+                            } else {
+                                0.85f
+                            }
+                            session?.move(StrokePoint(mx, my, pVal))
                             onStrokeStep()
                             ch.consume()
                         }
@@ -384,7 +420,7 @@ private fun DrawingPadPane(
             )
             Text(
                 "Test stroke here",
-                color = Color(0x44FFFFFF),
+                color = Color(0x66000000),
                 fontSize = 11.sp,
                 modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
             )

@@ -77,6 +77,7 @@ fun AppRoot(vm: CanvasViewModel) {
         BrushStudioModal(
             preset = target,
             colorRgb = vm.colorRgb,
+            fakePressureEnabled = vm.gestureSettings.fakePressureEnabled,
             onUpdate = { updated -> vm.updateBrushPreset(updated) },
             onDeleteCustom = { vm.deleteCustomBrush(target.id) },
             onImportAbr = launchImportAbr,

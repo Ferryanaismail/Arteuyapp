@@ -766,6 +766,7 @@ class ArtworkRepository(private val context: Context) {
                 palmRejection = o.optBoolean("palmRejection", false),
                 strokeSoundEnabled = o.optBoolean("strokeSoundEnabled", false),
                 zoomHudEnabled = o.optBoolean("zoomHudEnabled", true),
+                fakePressureEnabled = o.optBoolean("fakePressureEnabled", false),
                 colorDropThreshold = o.optDouble("colorDropThreshold", 0.25).toFloat(),
                 sideBarScale = o.optDouble("sideBarScale", 1.0).toFloat().coerceIn(0.45f, 1.0f),
                 sideBarVerticalBias = o.optDouble("sideBarVerticalBias", 0.5).toFloat().coerceIn(0.05f, 0.95f),
@@ -789,6 +790,7 @@ class ArtworkRepository(private val context: Context) {
             put("palmRejection", s.palmRejection)
             put("strokeSoundEnabled", s.strokeSoundEnabled)
             put("zoomHudEnabled", s.zoomHudEnabled)
+            put("fakePressureEnabled", s.fakePressureEnabled)
             put("colorDropThreshold", s.colorDropThreshold.toDouble())
             put("sideBarScale", s.sideBarScale.toDouble())
             put("sideBarVerticalBias", s.sideBarVerticalBias.toDouble())

@@ -475,6 +475,9 @@ fun TrackHeaderColumn(
                                     expanded = contextMenuTrackId == tr.id,
                                     track = tr,
                                     existingGroups = existingGroups,
+                                    multiSelectCount = if (multiSelectedIds.isNotEmpty()) (multiSelectedIds + tr.id).count { id ->
+                                        allTracks.any { it.id == id && it.kind != TrackKind.GROUP }
+                                    } else 0,
                                     canDelete = !(tr.kind == TrackKind.PAINT && allTracks.count { it.kind == TrackKind.PAINT } <= 1),
                                     onDismiss = { onContextMenuTrackChange(null) },
                                     onDuplicateTrack = {
@@ -657,6 +660,7 @@ private fun TrackContextMenu(
     expanded: Boolean,
     track: TimelineTrack,
     existingGroups: List<TimelineTrack>,
+    multiSelectCount: Int = 0,
     canDelete: Boolean,
     onDismiss: () -> Unit,
     onDuplicateTrack: () -> Unit,
@@ -826,8 +830,9 @@ private fun TrackContextMenu(
                 onClick = onToggleGroupExpanded,
             )
         } else {
+            val createGroupLabel = if (multiSelectCount > 1) "Create Group ($multiSelectCount Selected)" else "Create New Group"
             DropdownMenuItem(
-                text = { Text("Create New Group", color = Pc.TextPrimary, fontSize = 13.sp) },
+                text = { Text(createGroupLabel, color = Pc.TextPrimary, fontSize = 13.sp) },
                 leadingIcon = {
                     Icon(Icons.Rounded.CreateNewFolder, contentDescription = null, tint = Pc.Accent, modifier = Modifier.size(18.dp))
                 },
@@ -835,11 +840,12 @@ private fun TrackContextMenu(
                 modifier = Modifier.testTag("track_menu_create_group_${track.id}"),
             )
             existingGroups.forEach { grp ->
-                if (track.groupId != grp.id) {
+                if (track.groupId != grp.id || multiSelectCount > 1) {
+                    val addGroupLabel = if (multiSelectCount > 1) "Add $multiSelectCount to ${grp.name}" else "Add to ${grp.name}"
                     DropdownMenuItem(
                         text = {
                             Text(
-                                "Add to ${grp.name}",
+                                addGroupLabel,
                                 color = Pc.TextPrimary,
                                 fontSize = 13.sp,
                                 maxLines = 1,
