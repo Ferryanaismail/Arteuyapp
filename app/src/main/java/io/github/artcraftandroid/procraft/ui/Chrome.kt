@@ -8,6 +8,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -16,6 +17,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
@@ -30,10 +32,14 @@ import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -316,29 +322,123 @@ fun SideBar(
     right: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    BoxWithConstraints(modifier.fillMaxHeight(), contentAlignment = Alignment.Center) {
-        val trackHeight = Pc.sideTrackHeight(maxHeight)
-        val totalHeight = trackHeight * 2 + 166.dp
+    val haptic = LocalHapticFeedback.current
+    val density = LocalDensity.current
+    val scale = vm.gestureSettings.sideBarScale.coerceIn(0.45f, 1.0f)
+    val verticalBias = vm.gestureSettings.sideBarVerticalBias.coerceIn(0.02f, 0.98f)
+    val moveMode = vm.sideBarMoveMode
+
+    BoxWithConstraints(modifier.fillMaxHeight()) {
+        val baseTrackHeight = Pc.sideTrackHeight(maxHeight)
+        val trackHeight = (baseTrackHeight * scale).coerceAtLeast(64.dp)
+        val barWidth = Pc.SideBarWidth * (0.82f + 0.18f * scale)
+        val sliderWidth = Pc.SliderWidth * (0.80f + 0.20f * scale)
+        val extraMoveBadge = if (moveMode) 18.dp else 0.dp
+        val totalHeight = (trackHeight * 2 + 162.dp + extraMoveBadge).coerceAtMost(maxHeight)
         val corner = Pc.SideBarCorner
+        val availableRangePx = with(density) { (maxHeight - totalHeight).coerceAtLeast(1.dp).toPx() }
+        val alignBias = BiasAlignment(
+            horizontalBias = if (right) 1f else -1f,
+            verticalBias = (verticalBias * 2f - 1f).coerceIn(-1f, 1f),
+        )
 
         Column(
             Modifier
-                .width(Pc.SideBarWidth)
+                .align(alignBias)
+                .width(barWidth)
                 .height(totalHeight)
                 .clip(
                     if (right) RoundedCornerShape(topStart = corner, bottomStart = corner)
                     else RoundedCornerShape(topEnd = corner, bottomEnd = corner),
                 )
                 .background(Pc.SideBar)
-                .padding(horizontal = 5.dp, vertical = 6.dp),
+                .then(
+                    if (moveMode) {
+                        Modifier.border(
+                            1.8.dp,
+                            Pc.Accent,
+                            if (right) RoundedCornerShape(topStart = corner, bottomStart = corner)
+                            else RoundedCornerShape(topEnd = corner, bottomEnd = corner),
+                        )
+                    } else Modifier,
+                )
+                .pointerInput(Unit) {
+                    var tapCount = 0
+                    var lastTapUpMs = 0L
+                    val slop = viewConfiguration.touchSlop
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        val downPos = down.position
+                        val downTime = System.currentTimeMillis()
+                        var moved = false
+                        while (true) {
+                            val ev = awaitPointerEvent(PointerEventPass.Initial)
+                            val ch = ev.changes.firstOrNull { it.id == down.id }
+                            if (ch == null || !ch.pressed) break
+                            if ((ch.position - downPos).getDistance() > slop) {
+                                moved = true
+                            }
+                        }
+                        val upTime = System.currentTimeMillis()
+                        if (!moved && (upTime - downTime) < 320L) {
+                            if (upTime - lastTapUpMs <= 500L) {
+                                tapCount++
+                            } else {
+                                tapCount = 1
+                            }
+                            lastTapUpMs = upTime
+                            if (tapCount >= 3) {
+                                tapCount = 0
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                vm.sideBarMoveMode = !vm.sideBarMoveMode
+                                vm.showNotice(
+                                    if (vm.sideBarMoveMode) "Drag sidebar up/down • Tap canvas 1x when done"
+                                    else "Sidebar locked",
+                                )
+                            }
+                        } else {
+                            tapCount = 0
+                        }
+                    }
+                }
+                .then(
+                    if (moveMode) {
+                        Modifier.pointerInput(availableRangePx) {
+                            detectVerticalDragGestures { change, dragY ->
+                                change.consume()
+                                val deltaBias = dragY / availableRangePx
+                                vm.updateGestureSettings { s ->
+                                    s.copy(sideBarVerticalBias = (s.sideBarVerticalBias + deltaBias).coerceIn(0.02f, 0.98f))
+                                }
+                            }
+                        }
+                    } else Modifier,
+                )
+                .padding(horizontal = 4.dp, vertical = 6.dp)
+                .testTag("canvas_sidebar"),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
+            if (moveMode) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Pc.Accent)
+                        .padding(vertical = 2.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("Move", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
             SideVerticalSlider(
                 value = vm.brushSize,
                 onValueChange = { vm.brushSize = it },
                 notches = vm.sizeNotches,
+                width = sliderWidth,
                 height = trackHeight,
+                enabled = !moveMode,
                 label = "Brush Size",
                 testTag = "side_size_slider",
             )
@@ -346,18 +446,20 @@ fun SideBar(
             // Modify square button: tap enables Eyedropper next touch
             Box(
                 Modifier
-                    .size(40.dp, 40.dp)
+                    .size(40.dp, 38.dp)
                     .testTag("side_modify_button")
-                    .pointerInput(Unit) {
-                        detectTapGestures(
-                            onTap = {
-                                vm.pickNext = !vm.pickNext
-                                if (vm.pickNext) vm.showNotice("Eyedropper: tap canvas")
-                            },
-                            onLongPress = {
-                                vm.quickMenuCenter = Offset(vm.canvasAreaSize.width * 0.5f, vm.canvasAreaSize.height * 0.5f)
-                            },
-                        )
+                    .pointerInput(moveMode) {
+                        if (!moveMode) {
+                            detectTapGestures(
+                                onTap = {
+                                    vm.pickNext = !vm.pickNext
+                                    if (vm.pickNext) vm.showNotice("Eyedropper: tap canvas")
+                                },
+                                onLongPress = {
+                                    vm.quickMenuCenter = Offset(vm.canvasAreaSize.width * 0.5f, vm.canvasAreaSize.height * 0.5f)
+                                },
+                            )
+                        }
                     },
                 contentAlignment = Alignment.Center,
             ) {
@@ -381,7 +483,9 @@ fun SideBar(
                 value = vm.brushOpacity,
                 onValueChange = { vm.brushOpacity = it },
                 notches = emptyList(),
+                width = sliderWidth,
                 height = trackHeight,
+                enabled = !moveMode,
                 label = "Brush Opacity",
                 testTag = "side_opacity_slider",
             )
@@ -389,30 +493,30 @@ fun SideBar(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(
                     Modifier
-                        .size(40.dp, 38.dp)
+                        .size(40.dp, 36.dp)
                         .testTag("side_undo_button")
-                        .noRippleTap(enabled = vm.canUndo) { vm.undo() },
+                        .noRippleTap(enabled = vm.canUndo && !moveMode) { vm.undo() },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
                         PcIcons.Undo,
                         contentDescription = "Undo",
                         tint = if (vm.canUndo) Pc.SideGlyph else Pc.SideGlyphMuted,
-                        modifier = Modifier.size(32.dp),
+                        modifier = Modifier.size(30.dp),
                     )
                 }
                 Box(
                     Modifier
-                        .size(40.dp, 38.dp)
+                        .size(40.dp, 36.dp)
                         .testTag("side_redo_button")
-                        .noRippleTap(enabled = vm.canRedo) { vm.redo() },
+                        .noRippleTap(enabled = vm.canRedo && !moveMode) { vm.redo() },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
                         PcIcons.Redo,
                         contentDescription = "Redo",
                         tint = if (vm.canRedo) Pc.SideGlyph else Pc.SideGlyphMuted,
-                        modifier = Modifier.size(32.dp),
+                        modifier = Modifier.size(30.dp),
                     )
                 }
             }
@@ -425,7 +529,9 @@ private fun SideVerticalSlider(
     value: Float,
     onValueChange: (Float) -> Unit,
     notches: List<Float>,
+    width: Dp = Pc.SliderWidth,
     height: Dp,
+    enabled: Boolean = true,
     label: String,
     testTag: String,
 ) {
@@ -434,13 +540,14 @@ private fun SideVerticalSlider(
 
     Box(
         Modifier
-            .width(Pc.SliderWidth)
+            .width(width)
             .height(height)
             .clip(RoundedCornerShape(Pc.SliderCorner))
             .background(Color(0x44000000))
             .border(1.dp, Pc.SliderEdge, RoundedCornerShape(Pc.SliderCorner))
             .testTag(testTag)
-            .pointerInput(notches) {
+            .pointerInput(notches, enabled) {
+                if (!enabled) return@pointerInput
                 awaitEachGesture {
                     val down = awaitFirstDown()
                     fun posToVal(y: Float): Float {

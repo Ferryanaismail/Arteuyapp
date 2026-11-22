@@ -22,6 +22,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 private fun Context.interFamily(): FontFamily = FontFamily(
     Font("fonts/Inter-Regular.ttf", assets, FontWeight.Normal),
@@ -88,9 +90,13 @@ fun ClearBandShows(background: Color, darkBar: Boolean = Pc.light) {
     val view = LocalView.current
     SideEffect {
         val activity = view.context.findActivity() ?: return@SideEffect
+        WindowCompat.setDecorFitsSystemWindows(activity.window, false)
         val controller = WindowCompat.getInsetsController(activity.window, view)
         controller.isAppearanceLightStatusBars = darkBar
         controller.isAppearanceLightNavigationBars = darkBar
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller.hide(WindowInsetsCompat.Type.systemBars())
     }
 }
 

@@ -21,6 +21,7 @@ data class LoadedTimelineData(
     val fps: Int,
     val totalFrames: Int,
     val audioScrubEnabled: Boolean,
+    val timelineSnapping: Boolean = true,
 )
 
 class ArtworkRepository(private val context: Context) {
@@ -30,6 +31,9 @@ class ArtworkRepository(private val context: Context) {
     private val palettesFile = File(rootDir, "palettes.json")
     private val settingsFile = File(rootDir, "settings.json")
     private val customBrushesFile = File(rootDir, "custom_brushes.json")
+    private val brushTipsDir = File(rootDir, "brush_tips").apply { mkdirs() }
+
+    fun brushTipsDir(): File = brushTipsDir
 
     fun artworkMediaDir(artworkId: String): File =
         File(File(artworksDir, artworkId), "media").apply { mkdirs() }
@@ -52,7 +56,7 @@ class ArtworkRepository(private val context: Context) {
                             colorProfile = obj.optString("colorProfile", "sRGB IEC61966-2.1"),
                             backgroundRgb = obj.optInt("backgroundRgb", Color.WHITE),
                             backgroundVisible = obj.optBoolean("backgroundVisible", true),
-                            timelapseEnabled = obj.optBoolean("timelapseEnabled", true),
+                            timelapseEnabled = obj.optBoolean("timelapseEnabled", false),
                             createdAtMs = obj.optLong("createdAtMs", System.currentTimeMillis()),
                             updatedAtMs = obj.optLong("updatedAtMs", System.currentTimeMillis()),
                             totalStrokes = obj.optLong("totalStrokes", 0L),
@@ -194,8 +198,10 @@ class ArtworkRepository(private val context: Context) {
                 put("isPrivate", layer.isPrivate)
             }
             arr.put(obj)
-            FileOutputStream(File(dir, "layer_${layer.id}.png")).use { fos ->
-                layer.bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+            if (!layer.bitmap.isRecycled) {
+                FileOutputStream(File(dir, "layer_${layer.id}.png")).use { fos ->
+                    layer.bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                }
             }
         }
         File(dir, "layers.json").writeText(arr.toString())
@@ -226,6 +232,7 @@ class ArtworkRepository(private val context: Context) {
                     put("audioFilePath", clip.audioFilePath)
                     put("audioSampleRate", clip.audioSampleRate)
                     put("videoFrameCount", clip.videoFrames.size)
+                    put("orderTargetTrackId", clip.orderTargetTrackId)
                 }
                 clip.bitmap?.let { bmp ->
                     if (!bmp.isRecycled) {
@@ -256,6 +263,8 @@ class ArtworkRepository(private val context: Context) {
                     put("visible", tr.visible)
                     put("muted", tr.muted)
                     put("locked", tr.locked)
+                    put("opacity", tr.opacity.toDouble())
+                    put("isLayerOrderGroup", tr.isLayerOrderGroup)
                     put("layerId", tr.layerId)
                     put("groupId", tr.groupId)
                     put("expanded", tr.expanded)
@@ -270,6 +279,7 @@ class ArtworkRepository(private val context: Context) {
             put("fps", anim.fps)
             put("totalFrames", anim.totalFrames)
             put("audioScrubEnabled", anim.audioScrubEnabled)
+            put("timelineSnapping", anim.timelineSnapping)
             put("tracks", trArr)
         }
         File(dir, "timeline.json").writeText(rootObj.toString())
@@ -285,6 +295,7 @@ class ArtworkRepository(private val context: Context) {
             val fps = rootObj.optInt("fps", 12).coerceIn(1, 60)
             val totalFrames = rootObj.optInt("totalFrames", 24).coerceIn(1, 1200)
             val audioScrub = rootObj.optBoolean("audioScrubEnabled", true)
+            val timelineSnapping = rootObj.optBoolean("timelineSnapping", true)
             val trArr = rootObj.optJSONArray("tracks") ?: JSONArray()
             val tracks = ArrayList<TimelineTrack>(trArr.length())
 
@@ -336,6 +347,7 @@ class ArtworkRepository(private val context: Context) {
                             audioFilePath = audioPath,
                             audioSampleRate = sr,
                             waveformPeaks = peaks,
+                            orderTargetTrackId = co.optString("orderTargetTrackId").takeIf { it.isNotBlank() && it != "null" },
                         ),
                     )
                 }
@@ -349,6 +361,8 @@ class ArtworkRepository(private val context: Context) {
                         visible = to.optBoolean("visible", true),
                         muted = to.optBoolean("muted", false),
                         locked = to.optBoolean("locked", false),
+                        opacity = to.optDouble("opacity", 1.0).toFloat().coerceIn(0f, 1f),
+                        isLayerOrderGroup = to.optBoolean("isLayerOrderGroup", false),
                         layerId = to.optString("layerId").takeIf { it.isNotBlank() && it != "null" },
                         groupId = to.optString("groupId").takeIf { it.isNotBlank() && it != "null" },
                         expanded = to.optBoolean("expanded", true),
@@ -356,7 +370,13 @@ class ArtworkRepository(private val context: Context) {
                     ),
                 )
             }
-            LoadedTimelineData(tracks = tracks, fps = fps, totalFrames = totalFrames, audioScrubEnabled = audioScrub)
+            LoadedTimelineData(
+                tracks = tracks,
+                fps = fps,
+                totalFrames = totalFrames,
+                audioScrubEnabled = audioScrub,
+                timelineSnapping = timelineSnapping,
+            )
         }.getOrNull()
     }
 
@@ -488,6 +508,23 @@ class ArtworkRepository(private val context: Context) {
         shareExportFile(out, "image/gif")
     }
 
+    fun exportMp4AndShare(
+        title: String,
+        frames: List<Bitmap>,
+        fps: Int = 12,
+        maxDim: Int = 1080,
+    ): Boolean {
+        if (frames.isEmpty()) return false
+        val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
+        val safeName = title.replace(Regex("[^A-Za-z0-9_.-]"), "_").ifBlank { "ProCraft_Video" }
+        val out = File(exportDir, "$safeName.mp4")
+        val ok = AnimatedExporter.encodeMp4(frames, out, fps = fps, maxDim = maxDim)
+        if (ok) {
+            shareExportFile(out, "video/mp4")
+        }
+        return ok
+    }
+
     private fun shareExportFile(file: File, mime: String) {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
         val intent = Intent(Intent.ACTION_SEND).apply {
@@ -557,6 +594,7 @@ class ArtworkRepository(private val context: Context) {
                             saturationJitter = st.optDouble("saturationJitter", 0.0).toFloat(),
                             shapeKind = BrushShapeKind.entries.firstOrNull { it.name == st.optString("shapeKind") } ?: BrushShapeKind.ROUND,
                             quickShapeEnabled = st.optBoolean("quickShapeEnabled", true),
+                            tipPath = st.optString("tipPath").takeIf { it.isNotBlank() && it != "null" },
                         ),
                     )
                 }
@@ -598,6 +636,7 @@ class ArtworkRepository(private val context: Context) {
                     put("saturationJitter", s.saturationJitter.toDouble())
                     put("shapeKind", s.shapeKind.name)
                     put("quickShapeEnabled", s.quickShapeEnabled)
+                    put("tipPath", s.tipPath)
                 }
                 bArr.put(
                     JSONObject().apply {
@@ -635,7 +674,7 @@ class ArtworkRepository(private val context: Context) {
                     dpi = o.optInt("dpi", 300),
                     colorProfile = o.optString("colorProfile", "sRGB IEC61966-2.1"),
                     backgroundRgb = o.optInt("backgroundRgb", Color.WHITE),
-                    timelapseEnabled = o.optBoolean("timelapseEnabled", true),
+                    timelapseEnabled = o.optBoolean("timelapseEnabled", false),
                     isCustom = o.optBoolean("isCustom", false),
                 )
             }
@@ -728,6 +767,8 @@ class ArtworkRepository(private val context: Context) {
                 strokeSoundEnabled = o.optBoolean("strokeSoundEnabled", false),
                 zoomHudEnabled = o.optBoolean("zoomHudEnabled", true),
                 colorDropThreshold = o.optDouble("colorDropThreshold", 0.25).toFloat(),
+                sideBarScale = o.optDouble("sideBarScale", 1.0).toFloat().coerceIn(0.45f, 1.0f),
+                sideBarVerticalBias = o.optDouble("sideBarVerticalBias", 0.5).toFloat().coerceIn(0.05f, 0.95f),
             )
         }.getOrElse { GestureSettings() }
     }
@@ -749,6 +790,8 @@ class ArtworkRepository(private val context: Context) {
             put("strokeSoundEnabled", s.strokeSoundEnabled)
             put("zoomHudEnabled", s.zoomHudEnabled)
             put("colorDropThreshold", s.colorDropThreshold.toDouble())
+            put("sideBarScale", s.sideBarScale.toDouble())
+            put("sideBarVerticalBias", s.sideBarVerticalBias.toDouble())
         }
         settingsFile.writeText(o.toString())
     }

@@ -72,6 +72,10 @@ fun PaintingCanvas(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                     var maxPointersInGesture = 0
                     var gestureStartMs = 0L
                     var totalFingerMove = 0f
+                    var initialPinchDist = 0f
+                    var minPinchDist = 0f
+                    var pinchStartMs = 0L
+                    var dismissOnlyGesture = false
                     var threeFingerStartPan = Offset.Zero
                     var threeFingerLastPan = Offset.Zero
                     var threeFingerTracking = false
@@ -132,14 +136,23 @@ fun PaintingCanvas(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                                 shapeEnd = null
                             } else if (multiTouchActive) {
                                 val elapsed = System.currentTimeMillis() - gestureStartMs
+                                val pinchElapsed = System.currentTimeMillis() - pinchStartMs
                                 val dy3 = threeFingerLastPan.y - threeFingerStartPan.y
                                 val dx3 = threeFingerLastPan.x - threeFingerStartPan.x
-                                if (elapsed < 340L && totalFingerMove < 36f) {
+                                val isQuickPinchReset = maxPointersInGesture == 2 &&
+                                    initialPinchDist > 90f &&
+                                    (initialPinchDist - minPinchDist) > 55f &&
+                                    (minPinchDist / initialPinchDist) <= 0.65f &&
+                                    pinchElapsed <= 480L
+                                if (elapsed < 340L && totalFingerMove < 36f && !isQuickPinchReset) {
                                     when (maxPointersInGesture) {
                                         2 -> if (vm.gestureSettings.twoFingerUndo) vm.undo()
                                         3 -> if (vm.gestureSettings.threeFingerRedo) vm.redo()
                                         4 -> if (vm.gestureSettings.fourFingerFullscreen) vm.fullscreen = !vm.fullscreen
                                     }
+                                } else if (isQuickPinchReset) {
+                                    vm.fitCanvasToScreen()
+                                    vm.showNotice("Canvas Reset & Fit")
                                 } else if (maxPointersInGesture == 3 && threeFingerTracking && dy3 > 110f && abs(dy3) > abs(dx3) * 1.35f && totalFingerMove < 260f && vm.gestureSettings.threeFingerCopyPaste) {
                                     vm.copyPasteMenuOpen = true
                                 } else if (maxPointersInGesture == 3 && totalFingerMove > 260f && vm.gestureSettings.threeFingerClear) {
@@ -147,12 +160,16 @@ fun PaintingCanvas(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                                 }
                             }
                             multiTouchActive = false
+                            dismissOnlyGesture = false
                             threeFingerTracking = false
                             activeTransformHandle = -1
                             draggingAnchor = false
                             draggingRotation = false
                             maxPointersInGesture = 0
                             totalFingerMove = 0f
+                            initialPinchDist = 0f
+                            minPinchDist = 0f
+                            pinchStartMs = 0L
                             activeCursorPos = null
                             continue
                         }
@@ -168,6 +185,7 @@ fun PaintingCanvas(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                             // Cancel any started stroke when 2+ fingers touch (clean Undo + Viewport gesture)
                             eyedropperJob?.cancel()
                             quickShapeJob?.cancel()
+                            dismissOnlyGesture = false
                             if (drawingActive) {
                                 vm.endStroke()
                                 vm.undo()
@@ -198,6 +216,9 @@ fun PaintingCanvas(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                                 prevPan = (p0 + p1) * 0.5f
                                 prevDist = hypot(p1.x - p0.x, p1.y - p0.y).coerceAtLeast(1f)
                                 prevAngle = atan2(p1.y - p0.y, p1.x - p0.x)
+                                initialPinchDist = prevDist
+                                minPinchDist = prevDist
+                                pinchStartMs = System.currentTimeMillis()
                             } else {
                                 val p0 = pressed[0].position
                                 val p1 = pressed[1].position
@@ -211,6 +232,7 @@ fun PaintingCanvas(vm: CanvasViewModel, modifier: Modifier = Modifier) {
 
                                 val scaleFactor = dist / prevDist
                                 vm.viewZoom = (vm.viewZoom * scaleFactor).coerceIn(0.1f, 16f)
+                                if (dist < minPinchDist) minPinchDist = dist
 
                                 var dAngle = Math.toDegrees((angle - prevAngle).toDouble()).toFloat()
                                 if (dAngle > 180f) dAngle -= 360f
@@ -239,6 +261,21 @@ fun PaintingCanvas(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                         activeCursorPos = screenPos
                         val canvasPos = screenAreaToCanvas(vm, screenPos)
                         val isDownEdge = !ch.previousPressed && ch.pressed
+
+                        if (isDownEdge && (vm.sideBarMoveMode || vm.timelineClipHandlesId != null)) {
+                            if (vm.sideBarMoveMode) {
+                                vm.sideBarMoveMode = false
+                                vm.showNotice("Sidebar position saved")
+                            }
+                            vm.timelineClipHandlesId = null
+                            dismissOnlyGesture = true
+                            ch.consume()
+                            continue
+                        }
+                        if (dismissOnlyGesture) {
+                            ch.consume()
+                            continue
+                        }
 
                         if (vm.pickNext) {
                             if (isDownEdge) {

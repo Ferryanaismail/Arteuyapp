@@ -12,6 +12,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.FileOpen
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -31,11 +32,12 @@ import io.github.artcraftandroid.procraft.engine.BrushLibraryCatalog
 fun BrushLibraryPopover(
     vm: CanvasViewModel,
     caretFromEnd: Dp = 180.dp,
+    onImportAbr: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val active = vm.activeBrush
     var selectedSetId by remember(active.setId) { mutableStateOf(active.setId) }
-    val currentSet = vm.brushSets.firstOrNull { it.id == selectedSetId } ?: vm.brushSets.first()
+    val currentSet = vm.brushSets.firstOrNull { it.id == selectedSetId } ?: vm.brushSets.firstOrNull() ?: return
     var newSetDialogOpen by remember { mutableStateOf(false) }
     var renameSetId by remember { mutableStateOf<String?>(null) }
 
@@ -60,7 +62,15 @@ fun BrushLibraryPopover(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("Brush Library", color = Pc.TextPrimary, fontSize = Pc.TitleSize, fontWeight = FontWeight.SemiBold)
-            Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+                if (onImportAbr != null) {
+                    IconButton(
+                        onClick = onImportAbr,
+                        modifier = Modifier.size(48.dp).testTag("brush_library_import_abr"),
+                    ) {
+                        Icon(Icons.Rounded.FileOpen, contentDescription = "Import .abr Brushes", tint = Pc.Accent, modifier = Modifier.size(20.dp))
+                    }
+                }
                 IconButton(
                     onClick = { newSetDialogOpen = true },
                     modifier = Modifier.size(48.dp).testTag("new_brush_set_button"),

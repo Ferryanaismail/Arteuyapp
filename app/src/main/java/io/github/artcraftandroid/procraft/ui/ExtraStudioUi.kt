@@ -140,10 +140,12 @@ private fun CopyPasteTile(
 
 @Composable
 fun AnimatedExportDialog(vm: CanvasViewModel, onDismiss: () -> Unit) {
-    var selectedFormat by remember { mutableStateOf("GIF") }
-    var fps by remember { mutableIntStateOf(vm.animationState.fps.coerceIn(1, 24)) }
+    var selectedFormat by remember { mutableStateOf("MP4") }
+    var fps by remember { mutableIntStateOf(vm.animationState.fps.coerceIn(1, 60)) }
     var transparentBg by remember { mutableStateOf(false) }
     var pingPong by remember { mutableStateOf(false) }
+
+    val effectiveFps = if (selectedFormat == "GIF") fps.coerceIn(1, 24) else fps.coerceIn(1, 60)
 
     PcDialogShell(
         title = "Animated Export",
@@ -152,7 +154,7 @@ fun AnimatedExportDialog(vm: CanvasViewModel, onDismiss: () -> Unit) {
         onLeftClick = onDismiss,
         rightLabel = "Export",
         onRightClick = {
-            vm.exportAnimatedSequence(selectedFormat, fps, transparentBg, pingPong)
+            vm.exportAnimatedSequence(selectedFormat, effectiveFps, transparentBg, pingPong)
             onDismiss()
         },
         rightTag = "export_sequence_confirm",
@@ -163,35 +165,49 @@ fun AnimatedExportDialog(vm: CanvasViewModel, onDismiss: () -> Unit) {
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             PcSectionCard("Format") {
-                Row(Modifier.fillMaxWidth().padding(10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("GIF" to "Animated GIF", "SHEET" to "Sprite Sheet", "PDF" to "Multi-page PDF").forEach { (fmt, lbl) ->
-                        val sel = selectedFormat == fmt
-                        Box(
-                            Modifier
-                                .weight(1f)
-                                .heightIn(min = 44.dp)
-                                .clip(RoundedCornerShape(9.dp))
-                                .background(if (sel) Pc.Accent else Pc.PanelSurface)
-                                .clickable { selectedFormat = fmt }
-                                .padding(horizontal = 8.dp, vertical = 8.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(lbl, color = if (sel) Color.White else Pc.TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                val formats = listOf(
+                    "MP4" to "MP4 Video",
+                    "GIF" to "Animated GIF",
+                    "SHEET" to "Sprite Sheet",
+                    "PDF" to "Multi-page PDF",
+                )
+                Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    formats.chunked(2).forEach { rowItems ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            rowItems.forEach { (fmt, lbl) ->
+                                val sel = selectedFormat == fmt
+                                Box(
+                                    Modifier
+                                        .weight(1f)
+                                        .heightIn(min = 44.dp)
+                                        .clip(RoundedCornerShape(9.dp))
+                                        .background(if (sel) Pc.Accent else Pc.PanelSurface)
+                                        .clickable { selectedFormat = fmt }
+                                        .padding(horizontal = 8.dp, vertical = 8.dp)
+                                        .testTag("export_format_${fmt.lowercase()}"),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(lbl, color = if (sel) Color.White else Pc.TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            if (selectedFormat == "GIF") {
+            if (selectedFormat == "MP4" || selectedFormat == "GIF") {
+                val maxFps = if (selectedFormat == "GIF") 24 else 60
                 PcSectionCard("Animation Playback") {
                     Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text("Frames Per Second", color = Pc.TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                            Text("$fps FPS", color = Pc.Accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            Text("$effectiveFps FPS", color = Pc.Accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                         }
                         PcSlider(
-                            value = (fps - 1) / 23f,
-                            onValueChange = { f -> fps = 1 + (f * 23f).roundToInt().coerceIn(0, 23) },
+                            value = ((effectiveFps - 1).toFloat() / (maxFps - 1).coerceAtLeast(1)).coerceIn(0f, 1f),
+                            onValueChange = { f ->
+                                fps = 1 + (f * (maxFps - 1)).roundToInt().coerceIn(0, maxFps - 1)
+                            },
                         )
                     }
                     PcRowDivider()
@@ -199,8 +215,10 @@ fun AnimatedExportDialog(vm: CanvasViewModel, onDismiss: () -> Unit) {
                 }
             }
 
-            PcSectionCard("Background") {
-                PcToggleRow("Transparent Background", transparentBg) { transparentBg = it }
+            if (selectedFormat != "MP4") {
+                PcSectionCard("Background") {
+                    PcToggleRow("Transparent Background", transparentBg) { transparentBg = it }
+                }
             }
 
             val frameCountText = if (vm.timelineTracks.isNotEmpty()) {

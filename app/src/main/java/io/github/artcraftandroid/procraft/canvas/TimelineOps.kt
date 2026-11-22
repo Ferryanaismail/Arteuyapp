@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -44,6 +45,7 @@ internal fun CanvasViewModel.ensureTimelineInitialized() {
                 colorLabel = TRACK_LABEL_PALETTE[idx % TRACK_LABEL_PALETTE.size],
                 visible = layer.visible,
                 locked = layer.locked,
+                opacity = layer.opacity,
                 layerId = layer.id,
                 clips = listOf(clip),
             )
@@ -69,7 +71,7 @@ internal fun CanvasViewModel.syncPaintTracksWithLayers() {
         if (tr.kind == TrackKind.PAINT && tr.layerId != null) {
             val l = layers.firstOrNull { it.id == tr.layerId }
             if (l != null) {
-                updatedTracks.add(tr.copy(name = l.name, visible = l.visible, locked = l.locked))
+                updatedTracks.add(tr.copy(name = l.name, visible = l.visible, locked = l.locked, opacity = l.opacity))
             }
         } else {
             updatedTracks.add(tr)
@@ -97,6 +99,7 @@ internal fun CanvasViewModel.syncPaintTracksWithLayers() {
                 colorLabel = TRACK_LABEL_PALETTE[colorOffset++ % TRACK_LABEL_PALETTE.size],
                 visible = l.visible,
                 locked = l.locked,
+                opacity = l.opacity,
                 layerId = l.id,
                 clips = listOf(clip),
             )
@@ -182,21 +185,31 @@ internal fun CanvasViewModel.buildRenderLayersForFrame(frame: Int): List<LayerSt
         val tr = timelineTracks[i]
         val parent = tr.groupId?.let { groups[it] }
         val groupActive = parent == null || (parent.visible && !parent.muted)
-        val trackActive = tr.visible && !tr.muted && groupActive
+        val groupOpacity = parent?.opacity ?: 1f
+        val orderClip = if (parent != null && parent.isLayerOrderGroup) parent.clipAt(frame) else null
+        val blockedByOrder = parent != null && parent.isLayerOrderGroup &&
+            (orderClip == null || orderClip.orderTargetTrackId != tr.id)
+        val trackActive = tr.visible && !tr.muted && groupActive && !blockedByOrder
+        val effOpacity = (tr.opacity * groupOpacity).coerceIn(0f, 1f)
 
         when (tr.kind) {
             TrackKind.GROUP, TrackKind.AUDIO -> Unit
             TrackKind.PAINT -> {
+                if (!trackActive) continue
                 val baseLayer = tr.layerId?.let { layerById[it] } ?: continue
                 val clip = tr.clipAt(frame)
+                    ?: if (parent?.isLayerOrderGroup == true) tr.clips.firstOrNull() else null
                 val bmp = clip?.bitmap
-                if (trackActive && bmp != null && !bmp.isRecycled) {
-                    out.add(baseLayer.copy(bitmap = bmp, visible = true))
+                    ?: if (parent?.isLayerOrderGroup == true) baseLayer.bitmap else null
+                if (bmp != null && !bmp.isRecycled) {
+                    out.add(baseLayer.copy(bitmap = bmp, visible = true, opacity = effOpacity))
                 }
             }
             TrackKind.VIDEO -> {
+                if (!trackActive) continue
                 val clip = tr.clipAt(frame)
-                if (trackActive && clip != null && clip.videoFrames.isNotEmpty()) {
+                    ?: if (parent?.isLayerOrderGroup == true) tr.clips.firstOrNull() else null
+                if (clip != null && clip.videoFrames.isNotEmpty()) {
                     val vIdx = ((frame - clip.startFrame + clip.sourceFrameOffset).coerceAtLeast(0)) % clip.videoFrames.size
                     val vb = clip.videoFrames[vIdx]
                     if (!vb.isRecycled) {
@@ -205,7 +218,7 @@ internal fun CanvasViewModel.buildRenderLayersForFrame(frame: Int): List<LayerSt
                                 id = "video_${tr.id}",
                                 name = tr.name,
                                 visible = true,
-                                opacity = 1f,
+                                opacity = effOpacity,
                                 bitmap = vb,
                             ),
                         )
@@ -395,12 +408,133 @@ fun CanvasViewModel.insertBlankKeyframe(trackId: String? = null, frame: Int = an
     insertKeyframeInternal(targetId, frame, duplicateSource = false, silent = false)
 }
 
+fun CanvasViewModel.toggleTimelineSnapping() {
+    val next = !animationState.timelineSnapping
+    animationState = animationState.copy(timelineSnapping = next)
+    showNotice(if (next) "Timeline Snapping ON" else "Timeline Snapping OFF")
+    persistCurrentArtwork()
+}
+
 fun CanvasViewModel.insertDuplicateKeyframe(trackId: String? = null, frame: Int = animationState.currentFrameIndex) {
     val targetId = resolveTargetPaintTrackId(trackId) ?: run {
         showNotice("Select a Paint track first")
         return
     }
-    insertKeyframeInternal(targetId, frame, duplicateSource = true, silent = false)
+    val art = currentArtwork ?: return
+    val tr = timelineTracks.firstOrNull { it.id == targetId && it.kind == TrackKind.PAINT } ?: run {
+        insertKeyframeInternal(targetId, frame, duplicateSource = true, silent = false)
+        return
+    }
+    if (tr.locked) {
+        showNotice("${tr.name} is locked")
+        return
+    }
+    val safeFrame = frame.coerceIn(0, (animationState.totalFrames - 1).coerceAtLeast(0))
+    val sorted = tr.clips.sortedBy { it.startFrame }
+    val selectedOnTrack = animationState.selectedClipId?.let { cid -> sorted.firstOrNull { it.id == cid } }
+    val sourceClip = selectedOnTrack
+        ?: tr.clipAt(safeFrame)
+        ?: sorted.lastOrNull { it.endFrameExclusive <= safeFrame }
+
+    if (sourceClip == null) {
+        insertKeyframeInternal(targetId, frame, duplicateSource = true, silent = false)
+        return
+    }
+
+    val dur = sourceClip.durationFrames.coerceAtLeast(1)
+    val targetStart = sourceClip.endFrameExclusive
+    val targetEnd = targetStart + dur
+    val hasFrameAfter = sorted.any { it.id != sourceClip.id && it.startFrame >= sourceClip.endFrameExclusive }
+
+    val clonedBmp = if (sourceClip.bitmap != null && !sourceClip.bitmap.isRecycled) {
+        sourceClip.bitmap.copy(Bitmap.Config.ARGB_8888, true)
+    } else {
+        Bitmap.createBitmap(art.width, art.height, Bitmap.Config.ARGB_8888)
+    }
+    val newThumb = LayerCompositor.makeThumbnail(clonedBmp, 72).asImageBitmap()
+    val newClipId = UUID.randomUUID().toString()
+
+    if (hasFrameAfter || targetStart >= 1200) {
+        // A keyframe already exists after it on this track: create a new Paint Track directly ABOVE it
+        val trackIdx = timelineTracks.indexOfFirst { it.id == tr.id }.coerceAtLeast(0)
+        val srcLayer = tr.layerId?.let { lid -> layers.firstOrNull { it.id == lid } }
+        val newLayerId = UUID.randomUUID().toString()
+        val newLayerName = "${tr.name} Dup"
+        val newLayer = LayerState(
+            id = newLayerId,
+            name = newLayerName,
+            visible = srcLayer?.visible ?: true,
+            opacity = srcLayer?.opacity ?: 1f,
+            blendMode = srcLayer?.blendMode ?: LayerBlendMode.NORMAL,
+            bitmap = clonedBmp,
+            thumbnail = newThumb,
+        )
+        setLayersDirect(layers + newLayer)
+
+        val placeStart = targetStart.coerceIn(0, 1199)
+        val newClip = TimelineClip(
+            id = newClipId,
+            startFrame = placeStart,
+            durationFrames = dur,
+            label = sourceClip.label.ifBlank { "Key" },
+            bitmap = clonedBmp,
+            thumbnail = newThumb,
+        )
+        val neededTotal = max(animationState.totalFrames, min(1200, newClip.endFrameExclusive))
+        val newTrack = TimelineTrack(
+            id = UUID.randomUUID().toString(),
+            name = newLayerName,
+            kind = TrackKind.PAINT,
+            colorLabel = TRACK_LABEL_PALETTE[timelineTracks.size % TRACK_LABEL_PALETTE.size],
+            visible = tr.visible,
+            locked = false,
+            layerId = newLayerId,
+            groupId = tr.groupId,
+            clips = listOf(newClip),
+        )
+        val mutableTracks = timelineTracks.toMutableList()
+        mutableTracks.add(trackIdx, newTrack)
+        timelineTracks = mutableTracks
+        syncPaintLayersZOrder(mutableTracks)
+        animationState = animationState.copy(
+            totalFrames = neededTotal,
+            currentFrameIndex = placeStart.coerceIn(0, (neededTotal - 1).coerceAtLeast(0)),
+            selectedTrackId = newTrack.id,
+            selectedClipId = newClipId,
+        )
+        rebuildTimelineRenderState()
+        recomposite()
+        persistCurrentArtwork()
+        showNotice("Duplicated to new track above (${newTrack.name})")
+    } else {
+        // No frame after it: place duplicate immediately after sourceClip on the same track
+        val newClip = TimelineClip(
+            id = newClipId,
+            startFrame = targetStart,
+            durationFrames = dur,
+            label = "Key ${sorted.size + 1}",
+            bitmap = clonedBmp,
+            thumbnail = newThumb,
+        )
+        val neededTotal = max(animationState.totalFrames, min(1200, targetEnd))
+        val finalClips = (sorted + newClip).sortedBy { it.startFrame }
+        timelineTracks = timelineTracks.map { if (it.id == tr.id) it.copy(clips = finalClips) else it }
+        val layerIdx = layers.indexOfFirst { it.id == tr.layerId }
+        if (layerIdx >= 0) {
+            setActiveLayerIndexDirect(layerIdx)
+        }
+        animationState = animationState.copy(
+            totalFrames = neededTotal,
+            currentFrameIndex = targetStart.coerceIn(0, (neededTotal - 1).coerceAtLeast(0)),
+            selectedTrackId = tr.id,
+            selectedClipId = newClipId,
+        )
+        rebuildTimelineRenderState()
+        recomposite()
+        if (layerIdx >= 0) refreshLayerThumbnail(layerIdx)
+        persistCurrentArtwork()
+        showNotice("Duplicated Keyframe → F${targetStart + 1}")
+    }
 }
 
 private fun CanvasViewModel.insertKeyframeInternal(
@@ -574,6 +708,63 @@ fun CanvasViewModel.addPaintTrack() {
     showNotice("Added ${newTrack.name}")
 }
 
+fun CanvasViewModel.duplicatePaintTrack(trackId: String) {
+    val art = currentArtwork ?: return
+    val srcIdx = timelineTracks.indexOfFirst { it.id == trackId && it.kind == TrackKind.PAINT }
+    if (srcIdx < 0) return
+    val srcTrack = timelineTracks[srcIdx]
+    val srcLayer = srcTrack.layerId?.let { lid -> layers.firstOrNull { it.id == lid } }
+    val newLayerId = UUID.randomUUID().toString()
+    val newTrackId = UUID.randomUUID().toString()
+    val clonedClips = srcTrack.clips.map { cl ->
+        val bmpCopy = cl.bitmap?.takeIf { !it.isRecycled }?.copy(Bitmap.Config.ARGB_8888, true)
+        val thumb = bmpCopy?.let { LayerCompositor.makeThumbnail(it, 72).asImageBitmap() } ?: cl.thumbnail
+        cl.copy(
+            id = UUID.randomUUID().toString(),
+            bitmap = bmpCopy,
+            thumbnail = thumb,
+        )
+    }
+    val initialBmp = clonedClips.firstOrNull { it.coversFrame(animationState.currentFrameIndex) }?.bitmap
+        ?: clonedClips.firstOrNull()?.bitmap
+        ?: Bitmap.createBitmap(art.width, art.height, Bitmap.Config.ARGB_8888)
+    val newLayerName = "${srcTrack.name} Copy"
+    val newLayer = LayerState(
+        id = newLayerId,
+        name = newLayerName,
+        visible = srcLayer?.visible ?: srcTrack.visible,
+        opacity = srcLayer?.opacity ?: 1f,
+        blendMode = srcLayer?.blendMode ?: LayerBlendMode.NORMAL,
+        locked = srcLayer?.locked ?: srcTrack.locked,
+        alphaLock = srcLayer?.alphaLock ?: false,
+        clippingMask = srcLayer?.clippingMask ?: false,
+        bitmap = initialBmp,
+        thumbnail = if (!initialBmp.isRecycled) LayerCompositor.makeThumbnail(initialBmp, 96).asImageBitmap() else null,
+    )
+    setLayersDirect(layers + newLayer)
+
+    val newTrack = srcTrack.copy(
+        id = newTrackId,
+        name = newLayerName,
+        layerId = newLayerId,
+        clips = clonedClips,
+    )
+    val mutableTracks = timelineTracks.toMutableList()
+    mutableTracks.add(srcIdx, newTrack)
+    timelineTracks = mutableTracks
+    syncPaintLayersZOrder(mutableTracks)
+
+    val clipAtPlayhead = newTrack.clipAt(animationState.currentFrameIndex) ?: newTrack.clips.firstOrNull()
+    animationState = animationState.copy(
+        selectedTrackId = newTrackId,
+        selectedClipId = clipAtPlayhead?.id,
+    )
+    rebuildTimelineRenderState()
+    recomposite()
+    persistCurrentArtwork()
+    showNotice("Duplicated ${srcTrack.name}")
+}
+
 fun CanvasViewModel.renameTrack(trackId: String, name: String) {
     val clean = name.trim().ifBlank { return }
     val target = timelineTracks.firstOrNull { it.id == trackId } ?: return
@@ -732,9 +923,200 @@ fun CanvasViewModel.deleteTrack(trackId: String) {
     if (animationState.selectedTrackId == trackId) {
         animationState = animationState.copy(selectedTrackId = remaining.firstOrNull()?.id, selectedClipId = null)
     }
+    if (trackId in animationState.selectedTrackIds) {
+        animationState = animationState.copy(selectedTrackIds = animationState.selectedTrackIds - trackId)
+    }
+    if (layerOrderPickerGroupId == trackId) {
+        layerOrderPickerGroupId = null
+    }
     rebuildTimelineRenderState()
     recomposite()
     persistCurrentArtwork()
+}
+
+fun CanvasViewModel.setTrackOpacity(trackId: String, opacity: Float, persist: Boolean = false) {
+    val clamped = opacity.coerceIn(0f, 1f)
+    val target = timelineTracks.firstOrNull { it.id == trackId } ?: return
+    timelineTracks = timelineTracks.map { if (it.id == trackId) it.copy(opacity = clamped) else it }
+    if (target.kind == TrackKind.PAINT && target.layerId != null) {
+        setLayersDirect(layers.map { if (it.id == target.layerId) it.copy(opacity = clamped) else it })
+    }
+    rebuildTimelineRenderState()
+    recomposite()
+    if (persist) persistCurrentArtwork()
+}
+
+fun CanvasViewModel.toggleTrackMultiSelect(trackId: String) {
+    val cur = animationState.selectedTrackIds
+    val next = if (trackId in cur) cur - trackId else cur + trackId
+    animationState = animationState.copy(selectedTrackId = trackId, selectedTrackIds = next)
+}
+
+fun CanvasViewModel.clearMultiTrackSelection() {
+    animationState = animationState.copy(selectedTrackIds = emptySet())
+}
+
+fun CanvasViewModel.groupSelectedTracks() {
+    val selectedIds = animationState.selectedTrackIds
+    val candidates = timelineTracks.filter { it.id in selectedIds && it.kind != TrackKind.GROUP }
+    if (candidates.isEmpty()) {
+        showNotice("Swipe right on tracks to multi-select")
+        return
+    }
+    val groupId = UUID.randomUUID().toString()
+    val groupCount = timelineTracks.count { it.kind == TrackKind.GROUP } + 1
+    val groupTrack = TimelineTrack(
+        id = groupId,
+        name = "Group $groupCount",
+        kind = TrackKind.GROUP,
+        colorLabel = candidates.first().colorLabel,
+        expanded = true,
+    )
+    val firstIdx = timelineTracks.indexOfFirst { it.id in selectedIds && it.kind != TrackKind.GROUP }.coerceAtLeast(0)
+    val remaining = timelineTracks.filterNot { it.id in selectedIds && it.kind != TrackKind.GROUP }.toMutableList()
+    val groupedChildren = candidates.map { it.copy(groupId = groupId) }
+    val insertIdx = firstIdx.coerceIn(0, remaining.size)
+    remaining.add(insertIdx, groupTrack)
+    remaining.addAll(insertIdx + 1, groupedChildren)
+    timelineTracks = remaining
+    syncPaintLayersZOrder(remaining)
+    animationState = animationState.copy(selectedTrackId = groupId, selectedTrackIds = emptySet())
+    rebuildTimelineRenderState()
+    recomposite()
+    persistCurrentArtwork()
+    showNotice("Grouped ${candidates.size} tracks")
+}
+
+fun CanvasViewModel.deleteSelectedTracks() {
+    val selectedIds = animationState.selectedTrackIds
+    if (selectedIds.isEmpty()) return
+    val paintTracks = timelineTracks.filter { it.kind == TrackKind.PAINT }
+    val remainingPaintAfterDelete = paintTracks.count { it.id !in selectedIds }
+    val protectedPaintId = if (remainingPaintAfterDelete == 0) paintTracks.firstOrNull()?.id else null
+    val effectiveDeleteIds = if (protectedPaintId != null) selectedIds - protectedPaintId else selectedIds
+
+    val deletedLayerIds = timelineTracks
+        .filter { it.id in effectiveDeleteIds && it.kind == TrackKind.PAINT && it.layerId != null }
+        .mapNotNull { it.layerId }
+        .toSet()
+
+    val remaining = timelineTracks
+        .filterNot { it.id in effectiveDeleteIds }
+        .map { if (it.groupId != null && it.groupId in effectiveDeleteIds) it.copy(groupId = null) else it }
+
+    timelineTracks = remaining
+    if (deletedLayerIds.isNotEmpty()) {
+        setLayersDirect(layers.filterNot { it.id in deletedLayerIds })
+        setActiveLayerIndexDirect(activeLayerIndex.coerceIn(0, layers.lastIndex.coerceAtLeast(0)))
+    }
+    if (layerOrderPickerGroupId != null && layerOrderPickerGroupId in effectiveDeleteIds) {
+        layerOrderPickerGroupId = null
+    }
+    animationState = animationState.copy(
+        selectedTrackId = if (animationState.selectedTrackId in effectiveDeleteIds) remaining.firstOrNull()?.id else animationState.selectedTrackId,
+        selectedTrackIds = emptySet(),
+        selectedClipId = null,
+    )
+    rebuildTimelineRenderState()
+    recomposite()
+    persistCurrentArtwork()
+    showNotice(if (protectedPaintId != null) "Deleted selected (kept 1 Paint track)" else "Deleted ${effectiveDeleteIds.size} tracks")
+}
+
+fun CanvasViewModel.toggleGroupLayerOrder(groupTrackId: String) {
+    val tr = timelineTracks.firstOrNull { it.id == groupTrackId && it.kind == TrackKind.GROUP } ?: return
+    val nextMode = !tr.isLayerOrderGroup
+    timelineTracks = timelineTracks.map {
+        if (it.id == groupTrackId) it.copy(isLayerOrderGroup = nextMode, expanded = true) else it
+    }
+    if (!nextMode && layerOrderPickerGroupId == groupTrackId) {
+        layerOrderPickerGroupId = null
+    }
+    rebuildTimelineRenderState()
+    recomposite()
+    persistCurrentArtwork()
+    showNotice(
+        if (nextMode) "Group Layer Order ON — 3x tap group to pick frame"
+        else "Standard Group restored",
+    )
+}
+
+fun CanvasViewModel.insertLayerOrderKeyframe(
+    groupTrackId: String,
+    targetChildTrackId: String,
+    frame: Int = animationState.currentFrameIndex,
+) {
+    val grp = timelineTracks.firstOrNull { it.id == groupTrackId && it.kind == TrackKind.GROUP && it.isLayerOrderGroup } ?: return
+    val children = timelineTracks.filter { it.groupId == groupTrackId && it.kind != TrackKind.GROUP && it.kind != TrackKind.AUDIO }
+    val childIdx = children.indexOfFirst { it.id == targetChildTrackId }
+    val child = children.getOrNull(childIdx) ?: return
+
+    val safeFrame = frame.coerceIn(0, (animationState.totalFrames - 1).coerceAtLeast(0))
+    val sorted = grp.clips.sortedBy { it.startFrame }.toMutableList()
+    val coveringIdx = sorted.indexOfFirst { it.coversFrame(safeFrame) }
+    val thumb = child.clips.firstOrNull()?.thumbnail
+        ?: layers.firstOrNull { it.id == child.layerId }?.thumbnail
+    val newClipId = UUID.randomUUID().toString()
+    val newClips = mutableListOf<TimelineClip>()
+
+    if (coveringIdx >= 0) {
+        val covering = sorted[coveringIdx]
+        val origEnd = covering.endFrameExclusive
+        sorted.forEachIndexed { idx, cl ->
+            if (idx != coveringIdx) {
+                newClips.add(cl)
+            } else if (safeFrame > cl.startFrame) {
+                newClips.add(cl.copy(durationFrames = safeFrame - cl.startFrame))
+                newClips.add(
+                    TimelineClip(
+                        id = newClipId,
+                        startFrame = safeFrame,
+                        durationFrames = (origEnd - safeFrame).coerceAtLeast(1),
+                        label = "${childIdx + 1}: ${child.name}",
+                        thumbnail = thumb,
+                        orderTargetTrackId = child.id,
+                    ),
+                )
+            } else {
+                newClips.add(
+                    TimelineClip(
+                        id = newClipId,
+                        startFrame = safeFrame,
+                        durationFrames = cl.durationFrames,
+                        label = "${childIdx + 1}: ${child.name}",
+                        thumbnail = thumb,
+                        orderTargetTrackId = child.id,
+                    ),
+                )
+            }
+        }
+    } else {
+        val nextStart = sorted.firstOrNull { it.startFrame > safeFrame }?.startFrame ?: animationState.totalFrames
+        val dur = (nextStart - safeFrame).coerceAtLeast(1)
+        newClips.addAll(sorted)
+        newClips.add(
+            TimelineClip(
+                id = newClipId,
+                startFrame = safeFrame,
+                durationFrames = dur,
+                label = "${childIdx + 1}: ${child.name}",
+                thumbnail = thumb,
+                orderTargetTrackId = child.id,
+            ),
+        )
+    }
+
+    val finalClips = newClips.sortedBy { it.startFrame }
+    timelineTracks = timelineTracks.map { if (it.id == groupTrackId) it.copy(clips = finalClips) else it }
+    animationState = animationState.copy(
+        currentFrameIndex = safeFrame,
+        selectedTrackId = groupTrackId,
+        selectedClipId = newClipId,
+    )
+    rebuildTimelineRenderState()
+    recomposite()
+    persistCurrentArtwork()
+    showNotice("F${safeFrame + 1}: ${child.name}")
 }
 
 fun CanvasViewModel.createGroupTrack(targetTrackId: String? = animationState.selectedTrackId) {
@@ -849,21 +1231,44 @@ fun CanvasViewModel.moveClip(
     val clip = srcTrack.clips.firstOrNull { it.id == clipId } ?: return
     val maxStart = (animationState.totalFrames - 1).coerceAtLeast(0)
     val desiredStart = newStartFrame.coerceIn(0, maxStart)
-
-    val movedClip = clip.copy(startFrame = desiredStart)
-    if (movedClip.endFrameExclusive > animationState.totalFrames) {
-        animationState = animationState.copy(totalFrames = movedClip.endFrameExclusive.coerceAtMost(1200))
-    }
+    val snapping = animationState.timelineSnapping
 
     if (fromTrackId == toTrackId) {
         val others = srcTrack.clips.filter { it.id != clipId }
-        val nonOverlap = resolveClipPlacement(movedClip, others)
+        val finalStart = if (snapping) {
+            findNonOverlappingStart(desiredStart, clip.durationFrames, others)
+        } else {
+            desiredStart
+        }
+        val movedClip = clip.copy(startFrame = finalStart)
+        if (movedClip.endFrameExclusive > animationState.totalFrames) {
+            animationState = animationState.copy(totalFrames = movedClip.endFrameExclusive.coerceAtMost(1200))
+        }
+        val nonOverlap = if (snapping) {
+            (others + movedClip).sortedBy { it.startFrame }
+        } else {
+            resolveClipPlacement(movedClip, others)
+        }
         timelineTracks = timelineTracks.map {
             if (it.id == fromTrackId) it.copy(clips = nonOverlap) else it
         }
     } else {
         val srcRemaining = srcTrack.clips.filter { it.id != clipId }
-        val dstMerged = resolveClipPlacement(movedClip, dstTrack.clips)
+        val dstOthers = dstTrack.clips
+        val finalStart = if (snapping) {
+            findNonOverlappingStart(desiredStart, clip.durationFrames, dstOthers)
+        } else {
+            desiredStart
+        }
+        val movedClip = clip.copy(startFrame = finalStart)
+        if (movedClip.endFrameExclusive > animationState.totalFrames) {
+            animationState = animationState.copy(totalFrames = movedClip.endFrameExclusive.coerceAtMost(1200))
+        }
+        val dstMerged = if (snapping) {
+            (dstOthers + movedClip).sortedBy { it.startFrame }
+        } else {
+            resolveClipPlacement(movedClip, dstOthers)
+        }
         timelineTracks = timelineTracks.map {
             when (it.id) {
                 fromTrackId -> it.copy(clips = srcRemaining)
@@ -883,6 +1288,31 @@ fun CanvasViewModel.moveClip(
     persistCurrentArtwork()
 }
 
+private fun findNonOverlappingStart(desiredStart: Int, duration: Int, others: List<TimelineClip>): Int {
+    val dur = duration.coerceAtLeast(1)
+    val sorted = others.sortedBy { it.startFrame }
+    fun overlaps(s: Int): Boolean {
+        val e = s + dur
+        return sorted.any { s < it.endFrameExclusive && e > it.startFrame }
+    }
+    if (!overlaps(desiredStart)) return desiredStart.coerceAtLeast(0)
+
+    val candidates = ArrayList<Int>(sorted.size * 2 + 2)
+    candidates.add(0)
+    for (o in sorted) {
+        if (o.startFrame - dur >= 0) candidates.add(o.startFrame - dur)
+        candidates.add(o.endFrameExclusive)
+    }
+    val maxEnd = sorted.maxOfOrNull { it.endFrameExclusive } ?: 0
+    candidates.add(maxEnd)
+
+    return candidates
+        .distinct()
+        .filter { it >= 0 && !overlaps(it) }
+        .minByOrNull { abs(it - desiredStart) }
+        ?: maxEnd
+}
+
 fun CanvasViewModel.resizeClipDuration(
     trackId: String,
     clipId: String,
@@ -891,8 +1321,25 @@ fun CanvasViewModel.resizeClipDuration(
 ) {
     val tr = timelineTracks.firstOrNull { it.id == trackId } ?: return
     val clip = tr.clips.firstOrNull { it.id == clipId } ?: return
-    val safeStart = newStartFrame.coerceIn(0, (animationState.totalFrames - 1).coerceAtLeast(0))
-    val safeDur = newDurationFrames.coerceAtLeast(1)
+    val others = tr.clips.filter { it.id != clipId }.sortedBy { it.startFrame }
+    val snapping = animationState.timelineSnapping
+
+    var safeStart = newStartFrame.coerceIn(0, (animationState.totalFrames - 1).coerceAtLeast(0))
+    var safeDur = newDurationFrames.coerceAtLeast(1)
+
+    if (snapping) {
+        val prevLimit = others.lastOrNull { it.endFrameExclusive <= clip.startFrame }?.endFrameExclusive ?: 0
+        val nextLimit = others.firstOrNull { it.startFrame >= clip.endFrameExclusive }?.startFrame
+        if (safeStart < prevLimit) {
+            val origEnd = safeStart + safeDur
+            safeStart = prevLimit
+            safeDur = (origEnd - safeStart).coerceAtLeast(1)
+        }
+        if (nextLimit != null && safeStart + safeDur > nextLimit) {
+            safeDur = (nextLimit - safeStart).coerceAtLeast(1)
+        }
+    }
+
     val startDelta = safeStart - clip.startFrame
     val updated = clip.copy(
         startFrame = safeStart,
@@ -902,8 +1349,11 @@ fun CanvasViewModel.resizeClipDuration(
     if (updated.endFrameExclusive > animationState.totalFrames) {
         animationState = animationState.copy(totalFrames = updated.endFrameExclusive.coerceAtMost(1200))
     }
-    val others = tr.clips.filter { it.id != clipId }
-    val resolved = resolveClipPlacement(updated, others)
+    val resolved = if (snapping) {
+        (others + updated).sortedBy { it.startFrame }
+    } else {
+        resolveClipPlacement(updated, others)
+    }
     timelineTracks = timelineTracks.map { if (it.id == trackId) it.copy(clips = resolved) else it }
     rebuildTimelineRenderState()
     recomposite()

@@ -83,6 +83,7 @@ data class BrushSettings(
     val saturationJitter: Float = 0f, // 0f..1f
     val shapeKind: BrushShapeKind = BrushShapeKind.ROUND,
     val quickShapeEnabled: Boolean = true,
+    val tipPath: String? = null,
 )
 
 data class BrushPreset(
@@ -178,7 +179,7 @@ data class CanvasPreset(
     val dpi: Int = 300,
     val colorProfile: String = "sRGB IEC61966-2.1",
     val backgroundRgb: Int = 0xFFFFFFFF.toInt(),
-    val timelapseEnabled: Boolean = true,
+    val timelapseEnabled: Boolean = false,
     val isCustom: Boolean = false,
 ) {
     val pixelWidth: Int
@@ -266,6 +267,8 @@ data class GestureSettings(
     val strokeSoundEnabled: Boolean = false,
     val zoomHudEnabled: Boolean = true,
     val colorDropThreshold: Float = 0.25f,
+    val sideBarScale: Float = 1.0f,
+    val sideBarVerticalBias: Float = 0.5f,
 )
 
 data class LayerState(
@@ -305,7 +308,7 @@ data class ArtworkRecord(
     val colorProfile: String = "sRGB IEC61966-2.1",
     val backgroundRgb: Int = 0xFFFFFFFF.toInt(),
     val backgroundVisible: Boolean = true,
-    val timelapseEnabled: Boolean = true,
+    val timelapseEnabled: Boolean = false,
     val createdAtMs: Long = System.currentTimeMillis(),
     val updatedAtMs: Long = System.currentTimeMillis(),
     val totalStrokes: Long = 0L,
@@ -369,8 +372,10 @@ data class AnimationState(
     val currentFrameIndex: Int = 0,
     val audioScrubEnabled: Boolean = true,
     val selectedTrackId: String? = null,
+    val selectedTrackIds: Set<String> = emptySet(),
     val selectedClipId: String? = null,
     val timelineZoom: Float = 1f,
+    val timelineSnapping: Boolean = true,
 ) {
     val isAnimation: Boolean get() = enabled && assistMode == CanvasAssistMode.ANIMATION
     val isPageAssist: Boolean get() = enabled && assistMode == CanvasAssistMode.PAGE_ASSIST

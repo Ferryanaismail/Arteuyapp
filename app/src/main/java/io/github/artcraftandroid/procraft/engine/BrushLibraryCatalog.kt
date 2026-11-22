@@ -1,9 +1,12 @@
 package io.github.artcraftandroid.procraft.engine
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
-import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffColorFilter
+import android.graphics.RectF
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import io.github.artcraftandroid.procraft.model.*
@@ -157,6 +160,13 @@ object BrushLibraryCatalog {
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = colorRgb
         }
+        val tipBmp = s.tipPath?.let { path -> BitmapFactory.decodeFile(path) }
+        val tipPaint = if (tipBmp != null) {
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                colorFilter = PorterDuffColorFilter(colorRgb, PorterDuff.Mode.SRC_IN)
+            }
+        } else null
+        val dstRect = RectF()
         val steps = 80
         for (i in 0..steps) {
             val t = i.toFloat() / steps
@@ -170,6 +180,12 @@ object BrushLibraryCatalog {
             }
             val r = (baseR * (1f - s.pressureSize * (1f - pressure)) * taper).coerceAtLeast(1f)
             val alpha = (255 * s.opacity * (1f - s.pressureOpacity * (1f - pressure))).toInt().coerceIn(8, 255)
+            if (tipBmp != null && tipPaint != null) {
+                tipPaint.alpha = alpha
+                dstRect.set(x - r, y - r * s.roundness, x + r, y + r * s.roundness)
+                canvas.drawBitmap(tipBmp, null, dstRect, tipPaint)
+                continue
+            }
             paint.alpha = alpha
             when (s.shapeKind) {
                 BrushShapeKind.SPECKLE_SPRAY -> {
@@ -203,6 +219,7 @@ object BrushLibraryCatalog {
                 }
             }
         }
+        tipBmp?.recycle()
         return bmp.asImageBitmap()
     }
 }

@@ -4,8 +4,14 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaFormat
+import android.media.MediaMuxer
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.OutputStream
+import java.nio.ByteBuffer
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
@@ -13,10 +19,215 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * Pure Kotlin GIF89a animated encoder + filmstrip sheet exporter.
+ * Pure Kotlin GIF89a animated encoder, H.264 MP4 exporter, and filmstrip sheet exporter.
  * Encodes multi-frame artwork animations and Time-lapse sequences cleanly without external binaries.
  */
 object AnimatedExporter {
+
+    fun encodeMp4(
+        frames: List<Bitmap>,
+        outputFile: File,
+        fps: Int = 12,
+        maxDim: Int = 1080,
+    ): Boolean {
+        if (frames.isEmpty()) return false
+        val safeFps = fps.coerceIn(1, 60)
+        val first = frames.first()
+        val scale = min(maxDim.toFloat() / max(first.width, 1), maxDim.toFloat() / max(first.height, 1)).coerceAtMost(1f)
+        val w = max(64, ((first.width * scale).roundToInt() / 16) * 16)
+        val h = max(64, ((first.height * scale).roundToInt() / 16) * 16)
+
+        val sequence = if (frames.size == 1) {
+            List(safeFps.coerceIn(2, 12)) { frames.first() }
+        } else {
+            frames
+        }
+
+        var codec: MediaCodec? = null
+        var muxer: MediaMuxer? = null
+        var muxerStarted = false
+        val scaledBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val drawCanvas = Canvas(scaledBmp)
+        val drawPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+        val argb = IntArray(w * h)
+
+        return try {
+            val mime = MediaFormat.MIMETYPE_VIDEO_AVC
+            val format = MediaFormat.createVideoFormat(mime, w, h).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+                val bitRate = (w * h * safeFps * 0.14f).roundToInt().coerceIn(800_000, 12_000_000)
+                setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
+                setInteger(MediaFormat.KEY_FRAME_RATE, safeFps)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            }
+            codec = MediaCodec.createEncoderByType(mime)
+            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            codec.start()
+
+            if (outputFile.exists()) outputFile.delete()
+            muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+
+            val bufferInfo = MediaCodec.BufferInfo()
+            var trackIndex = -1
+            var inputDone = false
+            var outputDone = false
+            var frameIndex = 0
+            val frameDurationUs = 1_000_000L / safeFps
+            val timeoutUs = 10_000L
+
+            while (!outputDone) {
+                if (!inputDone) {
+                    val inIdx = codec.dequeueInputBuffer(timeoutUs)
+                    if (inIdx >= 0) {
+                        if (frameIndex < sequence.size) {
+                            val src = sequence[frameIndex]
+                            drawCanvas.drawColor(Color.WHITE)
+                            drawCanvas.drawBitmap(
+                                src,
+                                android.graphics.Rect(0, 0, src.width, src.height),
+                                android.graphics.Rect(0, 0, w, h),
+                                drawPaint,
+                            )
+                            scaledBmp.getPixels(argb, 0, w, 0, 0, w, h)
+                            val ptsUs = frameIndex * frameDurationUs
+                            val img = runCatching { codec.getInputImage(inIdx) }.getOrNull()
+                            val bytesWritten = if (img != null) {
+                                try {
+                                    fillImageYuv420(img, argb, w, h)
+                                } finally {
+                                    img.close()
+                                }
+                            } else {
+                                val buf = codec.getInputBuffer(inIdx)
+                                if (buf != null) fillBufferNv12(buf, argb, w, h) else 0
+                            }
+                            codec.queueInputBuffer(inIdx, 0, bytesWritten, ptsUs, 0)
+                            frameIndex++
+                        } else {
+                            codec.queueInputBuffer(
+                                inIdx,
+                                0,
+                                0,
+                                frameIndex * frameDurationUs,
+                                MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+                            )
+                            inputDone = true
+                        }
+                    }
+                }
+
+                var draining = true
+                while (draining) {
+                    val outIdx = codec.dequeueOutputBuffer(bufferInfo, timeoutUs)
+                    when {
+                        outIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> draining = false
+                        outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                            val outFormat = codec.outputFormat
+                            trackIndex = muxer.addTrack(outFormat)
+                            muxer.start()
+                            muxerStarted = true
+                        }
+                        outIdx >= 0 -> {
+                            val outBuf = codec.getOutputBuffer(outIdx)
+                            if (outBuf != null && bufferInfo.size > 0 && (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                                if (!muxerStarted) {
+                                    trackIndex = muxer.addTrack(codec.outputFormat)
+                                    muxer.start()
+                                    muxerStarted = true
+                                }
+                                outBuf.position(bufferInfo.offset)
+                                outBuf.limit(bufferInfo.offset + bufferInfo.size)
+                                muxer.writeSampleData(trackIndex, outBuf, bufferInfo)
+                            }
+                            val eos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                            codec.releaseOutputBuffer(outIdx, false)
+                            if (eos) {
+                                outputDone = true
+                                draining = false
+                            }
+                        }
+                    }
+                }
+            }
+            muxerStarted && outputFile.isFile && outputFile.length() > 0L
+        } catch (_: Throwable) {
+            runCatching { if (outputFile.exists()) outputFile.delete() }
+            false
+        } finally {
+            scaledBmp.recycle()
+            runCatching { codec?.stop() }
+            runCatching { codec?.release() }
+            if (muxerStarted) {
+                runCatching { muxer?.stop() }
+            }
+            runCatching { muxer?.release() }
+        }
+    }
+
+    private fun fillImageYuv420(image: android.media.Image, argb: IntArray, w: Int, h: Int): Int {
+        val planes = image.planes
+        val yPlane = planes[0]
+        val uPlane = planes[1]
+        val vPlane = planes[2]
+        val yBuf = yPlane.buffer
+        val uBuf = uPlane.buffer
+        val vBuf = vPlane.buffer
+        val yRowStride = yPlane.rowStride
+        val yPixelStride = yPlane.pixelStride
+        val uRowStride = uPlane.rowStride
+        val uPixelStride = uPlane.pixelStride
+        val vRowStride = vPlane.rowStride
+        val vPixelStride = vPlane.pixelStride
+
+        for (j in 0 until h) {
+            val rowOff = j * w
+            val yBase = j * yRowStride
+            for (i in 0 until w) {
+                val c = argb[rowOff + i]
+                val r = (c shr 16) and 0xFF
+                val g = (c shr 8) and 0xFF
+                val b = c and 0xFF
+                val y = (((66 * r + 129 * g + 25 * b + 128) shr 8) + 16).coerceIn(0, 255)
+                yBuf.put(yBase + i * yPixelStride, y.toByte())
+                if ((j and 1) == 0 && (i and 1) == 0) {
+                    val u = (((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128).coerceIn(0, 255)
+                    val v = (((112 * r - 94 * g - 18 * b + 128) shr 8) + 128).coerceIn(0, 255)
+                    val uvRow = j shr 1
+                    val uvCol = i shr 1
+                    uBuf.put(uvRow * uRowStride + uvCol * uPixelStride, u.toByte())
+                    vBuf.put(uvRow * vRowStride + uvCol * vPixelStride, v.toByte())
+                }
+            }
+        }
+        return (w * h * 3) / 2
+    }
+
+    private fun fillBufferNv12(buf: ByteBuffer, argb: IntArray, w: Int, h: Int): Int {
+        buf.clear()
+        val ySize = w * h
+        val needed = (ySize * 3) / 2
+        if (buf.capacity() < needed) return 0
+        var yIdx = 0
+        var uvIdx = ySize
+        for (j in 0 until h) {
+            val rowOff = j * w
+            for (i in 0 until w) {
+                val c = argb[rowOff + i]
+                val r = (c shr 16) and 0xFF
+                val g = (c shr 8) and 0xFF
+                val b = c and 0xFF
+                val y = (((66 * r + 129 * g + 25 * b + 128) shr 8) + 16).coerceIn(0, 255)
+                buf.put(yIdx++, y.toByte())
+                if ((j and 1) == 0 && (i and 1) == 0) {
+                    val u = (((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128).coerceIn(0, 255)
+                    val v = (((112 * r - 94 * g - 18 * b + 128) shr 8) + 128).coerceIn(0, 255)
+                    buf.put(uvIdx++, u.toByte())
+                    buf.put(uvIdx++, v.toByte())
+                }
+            }
+        }
+        return needed
+    }
 
     fun encodeGif(
         frames: List<Bitmap>,

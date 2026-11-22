@@ -6,6 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -63,6 +64,12 @@ fun LayersPopover(
     var actionMenuIdx by remember { mutableStateOf<Int?>(null) }
     var bgColorPickerOpen by remember { mutableStateOf(false) }
     var renamingIdx by remember { mutableStateOf<Int?>(null) }
+
+    LaunchedEffect(vm.layers) {
+        if (expandedBlendIdx != null && expandedBlendIdx !in vm.layers.indices) expandedBlendIdx = null
+        if (actionMenuIdx != null && actionMenuIdx !in vm.layers.indices) actionMenuIdx = null
+        if (renamingIdx != null && renamingIdx !in vm.layers.indices) renamingIdx = null
+    }
 
     PcPopoverFrame(
         caretFromEnd = caretFromEnd,
@@ -165,13 +172,12 @@ fun LayersPopover(
         }
 
         // Layer stack (displayed top-most layer first!)
-        val reversedIndices = remember(vm.layers.size) { vm.layers.indices.reversed().toList() }
+        val indexedLayers = remember(vm.layers) { vm.layers.indices.reversed().map { it to vm.layers[it] } }
         LazyColumn(
             Modifier.weight(1f).fillMaxWidth().padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            itemsIndexed(reversedIndices, key = { _, idx -> vm.layers[idx].id }) { _, realIdx ->
-                val layer = vm.layers[realIdx]
+            items(indexedLayers, key = { (_, layer) -> layer.id }) { (realIdx, layer) ->
                 val isSelected = realIdx == vm.activeLayerIndex
                 val isHeld = layer.id in vm.heldLayerIds
                 Row(

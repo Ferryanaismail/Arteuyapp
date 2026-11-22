@@ -69,8 +69,9 @@ class BrushStrokeSession(
         style = Paint.Style.STROKE
     }
 
+    private val hasCustomTip: Boolean = !brush.tipPath.isNullOrBlank()
     private val stampSprite: Bitmap? = buildStampSprite()
-    private var lastTintColor: Int = if (tool == ToolKind.PAINT) colorRgb else Int.MIN_VALUE
+    private var lastTintColor: Int = if (tool == ToolKind.PAINT && !hasCustomTip) colorRgb else Int.MIN_VALUE
     private var lastTintFilter: PorterDuffColorFilter? = null
 
     private val dstRectF = RectF()
@@ -82,6 +83,11 @@ class BrushStrokeSession(
     private var hasDirty = false
 
     private fun buildStampSprite(): Bitmap? {
+        val tipFile = brush.tipPath
+        if (!tipFile.isNullOrBlank()) {
+            val decoded = BitmapFactory.decodeFile(tipFile)
+            if (decoded != null) return decoded
+        }
         val needsSoftSprite = when (brush.shapeKind) {
             BrushShapeKind.SOFT_AIR -> true
             BrushShapeKind.WATERCOLOR_BLOOM -> true
@@ -463,20 +469,33 @@ class BrushStrokeSession(
         val effectiveColor = computeDynamicPaintColor()
 
         val sprite = stampSprite
-        if (sprite != null && (brush.shapeKind == BrushShapeKind.SOFT_AIR || brush.shapeKind == BrushShapeKind.WATERCOLOR_BLOOM || brush.shapeKind == BrushShapeKind.ROUND || brush.shapeKind == BrushShapeKind.INK_NIB)) {
+        if (sprite != null && !sprite.isRecycled && (hasCustomTip || brush.shapeKind == BrushShapeKind.SOFT_AIR || brush.shapeKind == BrushShapeKind.WATERCOLOR_BLOOM || brush.shapeKind == BrushShapeKind.ROUND || brush.shapeKind == BrushShapeKind.INK_NIB)) {
             stampPaint.alpha = effectiveAlpha
-            if (tool == ToolKind.SMUDGE || (tool == ToolKind.PAINT && effectiveColor != colorRgb)) {
-                if (effectiveColor != lastTintColor) {
-                    lastTintColor = effectiveColor
-                    lastTintFilter = PorterDuffColorFilter(effectiveColor, PorterDuff.Mode.SRC_IN)
+            if (hasCustomTip || tool == ToolKind.SMUDGE || (tool == ToolKind.PAINT && effectiveColor != colorRgb)) {
+                val targetTint = if (tool == ToolKind.ERASE) Color.BLACK else effectiveColor
+                if (targetTint != lastTintColor || lastTintFilter == null) {
+                    lastTintColor = targetTint
+                    lastTintFilter = PorterDuffColorFilter(targetTint, PorterDuff.Mode.SRC_IN)
                 }
                 stampPaint.colorFilter = lastTintFilter
             } else {
                 stampPaint.colorFilter = null
             }
-            val scaleR = if (brush.shapeKind == BrushShapeKind.WATERCOLOR_BLOOM) r * 1.1f else r
-            dstRectF.set(sx - scaleR, sy - scaleR, sx + scaleR, sy + scaleR)
-            workCanvas.drawBitmap(sprite, null, dstRectF, stampPaint)
+            if (hasCustomTip) {
+                val aspect = sprite.width.toFloat() / sprite.height.coerceAtLeast(1).toFloat()
+                val hw = r * (if (aspect >= 1f) 1f else aspect)
+                val hh = r * (if (aspect >= 1f) 1f / aspect else 1f) * brush.roundness
+                workCanvas.save()
+                workCanvas.translate(sx, sy)
+                if (abs(brush.angleDeg) > 0.5f) workCanvas.rotate(brush.angleDeg)
+                dstRectF.set(-hw, -hh, hw, hh)
+                workCanvas.drawBitmap(sprite, null, dstRectF, stampPaint)
+                workCanvas.restore()
+            } else {
+                val scaleR = if (brush.shapeKind == BrushShapeKind.WATERCOLOR_BLOOM) r * 1.1f else r
+                dstRectF.set(sx - scaleR, sy - scaleR, sx + scaleR, sy + scaleR)
+                workCanvas.drawBitmap(sprite, null, dstRectF, stampPaint)
+            }
             return
         }
 

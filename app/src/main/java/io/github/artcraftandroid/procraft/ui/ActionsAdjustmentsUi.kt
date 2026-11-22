@@ -314,7 +314,7 @@ fun ActionsPopover(
                     }
                     PcSectionCard("Share Layers") {
                         PcNavRow(
-                            label = "Animated GIF / Sprite Sheet",
+                            label = "Animated MP4 / GIF / Sheet",
                             icon = LucideIcons.InfoLayers,
                             testTag = "actions_animated_export",
                         ) {
@@ -344,7 +344,17 @@ fun ActionsPopover(
                         }
                         PcRowDivider(indent = 42.dp)
                         PcNavRow(
-                            label = "Export Time-lapse Video",
+                            label = "Export Time-lapse MP4",
+                            icon = LucideIcons.TabShare,
+                            showChevron = false,
+                            testTag = "actions_timelapse_export_mp4",
+                        ) {
+                            vm.panel = Panel.NONE
+                            vm.exportTimeLapseMp4()
+                        }
+                        PcRowDivider(indent = 42.dp)
+                        PcNavRow(
+                            label = "Export Time-lapse GIF",
                             icon = LucideIcons.TabShare,
                             showChevron = false,
                             testTag = "actions_timelapse_export",
@@ -417,6 +427,32 @@ fun ActionsPopover(
                             testTag = "prefs_zoom_hud_switch",
                         ) { show ->
                             vm.updateGestureSettings { it.copy(zoomHudEnabled = show) }
+                        }
+                    }
+                    PcSectionCard("Brush & Opacity Sliders") {
+                        val scalePct = (vm.gestureSettings.sideBarScale.coerceIn(0.45f, 1.0f) * 100f).roundToInt()
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                        ) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("Slider Size", color = Pc.TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                Text("$scalePct%", color = Pc.Accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                            PcSlider(
+                                value = ((vm.gestureSettings.sideBarScale - 0.45f) / 0.55f).coerceIn(0f, 1f),
+                                onValueChange = { f ->
+                                    val nextScale = (0.45f + f * 0.55f).coerceIn(0.45f, 1.0f)
+                                    vm.updateGestureSettings { it.copy(sideBarScale = nextScale) }
+                                },
+                                modifier = Modifier.testTag("prefs_sidebar_size_slider"),
+                            )
+                            Text(
+                                "Triple-tap sidebar to move up/down; tap canvas 1x when done.",
+                                color = Pc.TextSecondary,
+                                fontSize = 11.sp,
+                            )
                         }
                     }
                     PcSectionCard("Controls") {

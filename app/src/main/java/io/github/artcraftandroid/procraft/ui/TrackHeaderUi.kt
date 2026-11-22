@@ -4,7 +4,10 @@ import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,6 +42,7 @@ import androidx.compose.ui.zIndex
 import io.github.artcraftandroid.procraft.canvas.*
 import io.github.artcraftandroid.procraft.model.*
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 @Immutable
 data class TrackDragUiState(
@@ -77,6 +81,8 @@ fun TrackHeaderColumn(
         allTracks.filter { it.kind == TrackKind.GROUP }
     }
 
+    val multiSelectedIds = vm.animationState.selectedTrackIds
+
     Column(
         Modifier
             .width(headerWidth)
@@ -84,28 +90,76 @@ fun TrackHeaderColumn(
             .background(Pc.PanelSurface)
             .border(0.6.dp, Pc.Divider),
     ) {
-        // Ruler corner header
+        // Ruler corner header (shows Multi-Select actions when tracks are swiped right)
         Row(
             Modifier
                 .fillMaxWidth()
                 .height(26.dp)
-                .background(Pc.PanelHeader)
-                .padding(horizontal = 8.dp),
+                .background(if (multiSelectedIds.isNotEmpty()) Pc.RowSelected else Pc.PanelHeader)
+                .padding(horizontal = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Text(
-                "TRACKS (${visibleTracks.size})",
-                color = Pc.TextSecondary,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-            )
-            Text(
-                "${zoomPct}%",
-                color = Pc.Accent,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
+            if (multiSelectedIds.isNotEmpty()) {
+                Text(
+                    "Sel (${multiSelectedIds.size})",
+                    color = Pc.Accent,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    IconButton(
+                        onClick = { vm.groupSelectedTracks() },
+                        modifier = Modifier.size(24.dp).testTag("multi_group_tracks_btn"),
+                    ) {
+                        Icon(
+                            Icons.Rounded.CreateNewFolder,
+                            contentDescription = "Group Selected Tracks",
+                            tint = Pc.Accent,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                    IconButton(
+                        onClick = { vm.deleteSelectedTracks() },
+                        modifier = Modifier.size(24.dp).testTag("multi_delete_tracks_btn"),
+                    ) {
+                        Icon(
+                            Icons.Rounded.Delete,
+                            contentDescription = "Delete Selected Tracks",
+                            tint = Pc.Destructive,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                    IconButton(
+                        onClick = { vm.clearMultiTrackSelection() },
+                        modifier = Modifier.size(24.dp).testTag("multi_clear_tracks_btn"),
+                    ) {
+                        Icon(
+                            Icons.Rounded.Close,
+                            contentDescription = "Clear Multi-Selection",
+                            tint = Pc.TextSecondary,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                }
+            } else {
+                Text(
+                    "TRACKS (${visibleTracks.size})",
+                    color = Pc.TextSecondary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    "${zoomPct}%",
+                    color = Pc.Accent,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
         }
 
         Box(
@@ -117,10 +171,14 @@ fun TrackHeaderColumn(
             Column(Modifier.fillMaxWidth()) {
                 visibleTracks.forEach { tr ->
                     val isSelected = tr.id == selectedTrackId
+                    val isMultiSelected = tr.id in multiSelectedIds
                     val isDragging = dragState.draggingTrackId == tr.id
                     val isGroupDropTarget = dragState.dropIntoGroupId == tr.id
                     val labelColor = Color(tr.colorLabel.argb)
                     val isGroupedChild = tr.groupId != null
+                    var swipeOffsetX by remember(tr.id) { mutableFloatStateOf(0f) }
+                    var lastGroupTapMs by remember(tr.id) { mutableLongStateOf(0L) }
+                    var groupTapCount by remember(tr.id) { mutableIntStateOf(0) }
 
                     Box(
                         Modifier
@@ -133,6 +191,8 @@ fun TrackHeaderColumn(
                                     scaleX = 1.02f
                                     scaleY = 1.02f
                                     alpha = 0.94f
+                                } else if (swipeOffsetX != 0f) {
+                                    translationX = swipeOffsetX
                                 }
                             },
                     ) {
@@ -150,6 +210,10 @@ fun TrackHeaderColumn(
                                         Modifier
                                             .background(Pc.Accent.copy(alpha = 0.24f))
                                             .border(1.5.dp, Pc.Accent)
+                                    } else if (isMultiSelected) {
+                                        Modifier
+                                            .background(Pc.Accent.copy(alpha = 0.20f))
+                                            .border(1.2.dp, Pc.Accent)
                                     } else {
                                         Modifier
                                             .background(if (isSelected) Pc.RowSelected else Color.Transparent)
@@ -205,9 +269,7 @@ fun TrackHeaderColumn(
                                             val srcIdx = curTracks.indexOfFirst { it.id == tr.id }
                                             onDragStateChange(TrackDragUiState())
 
-                                            if (abs(curDrag.dragOffsetY) <= 10f && curDrag.dropIntoGroupId == null) {
-                                                onContextMenuTrackChange(tr.id)
-                                            } else if (srcIdx >= 0) {
+                                            if (srcIdx >= 0 && (abs(curDrag.dragOffsetY) > 10f || curDrag.dropIntoGroupId != null)) {
                                                 vm.reorderOrGroupTrack(
                                                     draggedTrackId = tr.id,
                                                     visibleTracksSnapshot = curTracks,
@@ -221,9 +283,48 @@ fun TrackHeaderColumn(
                                         },
                                     )
                                 }
+                                .pointerInput("swipe_${tr.id}") {
+                                    var totalRight = 0f
+                                    var toggled = false
+                                    detectHorizontalDragGestures(
+                                        onDragStart = {
+                                            totalRight = 0f
+                                            toggled = false
+                                        },
+                                        onHorizontalDrag = { change, dragAmount ->
+                                            if (latestDragState.draggingTrackId != null) return@detectHorizontalDragGestures
+                                            if (dragAmount > 0f || totalRight > 0f) {
+                                                change.consume()
+                                                totalRight = (totalRight + dragAmount).coerceAtLeast(0f)
+                                                swipeOffsetX = totalRight.coerceIn(0f, 26f)
+                                                if (!toggled && totalRight >= 34f) {
+                                                    toggled = true
+                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                    vm.toggleTrackMultiSelect(tr.id)
+                                                }
+                                            }
+                                        },
+                                        onDragEnd = {
+                                            swipeOffsetX = 0f
+                                            totalRight = 0f
+                                        },
+                                        onDragCancel = {
+                                            swipeOffsetX = 0f
+                                            totalRight = 0f
+                                        },
+                                    )
+                                }
                                 .clickable {
                                     vm.selectTrack(tr.id)
-                                    onContextMenuTrackChange(tr.id)
+                                    if (tr.kind == TrackKind.GROUP && tr.isLayerOrderGroup) {
+                                        val now = System.currentTimeMillis()
+                                        groupTapCount = if (now - lastGroupTapMs <= 420L) groupTapCount + 1 else 1
+                                        lastGroupTapMs = now
+                                        if (groupTapCount >= 3) {
+                                            groupTapCount = 0
+                                            vm.layerOrderPickerGroupId = tr.id
+                                        }
+                                    }
                                 }
                                 .padding(end = 2.dp)
                                 .testTag("track_header_${tr.id}"),
@@ -241,13 +342,13 @@ fun TrackHeaderColumn(
                             if (tr.kind == TrackKind.GROUP) {
                                 IconButton(
                                     onClick = { vm.toggleGroupExpanded(tr.id) },
-                                    modifier = Modifier.size(if (compactHeader) 24.dp else 28.dp),
+                                    modifier = Modifier.size(if (compactHeader) 22.dp else 26.dp),
                                 ) {
                                     Icon(
                                         imageVector = if (tr.expanded) Icons.Rounded.ExpandMore else Icons.Rounded.ChevronRight,
                                         contentDescription = if (tr.expanded) "Collapse Group" else "Expand Group",
                                         tint = labelColor,
-                                        modifier = Modifier.size(17.dp),
+                                        modifier = Modifier.size(16.dp),
                                     )
                                 }
                             } else {
@@ -260,29 +361,78 @@ fun TrackHeaderColumn(
                                     },
                                     contentDescription = tr.kind.label,
                                     tint = labelColor,
-                                    modifier = Modifier.size(if (compactHeader) 12.dp else 14.dp),
+                                    modifier = Modifier.size(if (compactHeader) 12.dp else 13.dp),
                                 )
                                 Spacer(Modifier.width(3.dp))
                             }
 
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    tr.name,
-                                    color = if (tr.visible && !tr.muted) Pc.TextPrimary else Pc.TextSecondary,
-                                    fontSize = if (compactHeader) 10.sp else 11.sp,
-                                    fontWeight = if (isSelected || tr.kind == TrackKind.GROUP) FontWeight.SemiBold else FontWeight.Normal,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                if (isGroupDropTarget) {
+                            Column(
+                                Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                ) {
+                                    if (isMultiSelected) {
+                                        Icon(
+                                            Icons.Rounded.CheckCircle,
+                                            contentDescription = "Selected",
+                                            tint = Pc.Accent,
+                                            modifier = Modifier.size(11.dp),
+                                        )
+                                    }
                                     Text(
-                                        "+ Group",
-                                        color = Pc.Accent,
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.Bold,
+                                        tr.name,
+                                        color = if (tr.visible && !tr.muted) Pc.TextPrimary else Pc.TextSecondary,
+                                        fontSize = if (compactHeader) 10.sp else 11.sp,
+                                        fontWeight = if (isSelected || tr.kind == TrackKind.GROUP) FontWeight.SemiBold else FontWeight.Normal,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false),
                                     )
-                                } else if (tr.locked) {
-                                    Text("Locked", color = Pc.Warning, fontSize = 8.sp)
+                                    if (isGroupDropTarget) {
+                                        Text(
+                                            "+Grp",
+                                            color = Pc.Accent,
+                                            fontSize = 8.sp,
+                                            fontWeight = FontWeight.Bold,
+                                        )
+                                    } else if (tr.kind == TrackKind.GROUP && tr.isLayerOrderGroup) {
+                                        Text(
+                                            "Order",
+                                            color = Pc.Accent,
+                                            fontSize = 8.sp,
+                                            fontWeight = FontWeight.Bold,
+                                        )
+                                    } else if (tr.locked) {
+                                        Text("Lck", color = Pc.Warning, fontSize = 8.sp)
+                                    }
+                                }
+
+                                // Compact inline Opacity Slider beneath track name (including Group tracks!)
+                                TrackInlineOpacitySlider(
+                                    trackId = tr.id,
+                                    opacity = tr.opacity,
+                                    accentColor = labelColor,
+                                    onOpacityChange = { valNext -> vm.setTrackOpacity(tr.id, valNext, persist = false) },
+                                    onOpacityCommit = { valFinal -> vm.setTrackOpacity(tr.id, valFinal, persist = true) },
+                                )
+                            }
+
+                            if (tr.kind == TrackKind.GROUP) {
+                                IconButton(
+                                    onClick = { vm.toggleGroupLayerOrder(tr.id) },
+                                    modifier = Modifier
+                                        .size(if (compactHeader) 22.dp else 24.dp)
+                                        .testTag("group_layer_order_btn_${tr.id}"),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.DynamicFeed,
+                                        contentDescription = "Toggle Group Layer Order",
+                                        tint = if (tr.isLayerOrderGroup) Pc.Accent else Pc.TextSecondary,
+                                        modifier = Modifier.size(13.dp),
+                                    )
                                 }
                             }
 
@@ -327,6 +477,10 @@ fun TrackHeaderColumn(
                                     existingGroups = existingGroups,
                                     canDelete = !(tr.kind == TrackKind.PAINT && allTracks.count { it.kind == TrackKind.PAINT } <= 1),
                                     onDismiss = { onContextMenuTrackChange(null) },
+                                    onDuplicateTrack = {
+                                        onContextMenuTrackChange(null)
+                                        vm.duplicatePaintTrack(tr.id)
+                                    },
                                     onRename = {
                                         onContextMenuTrackChange(null)
                                         onRenameTrack(tr.id)
@@ -345,6 +499,14 @@ fun TrackHeaderColumn(
                                     onToggleGroupExpanded = {
                                         onContextMenuTrackChange(null)
                                         vm.toggleGroupExpanded(tr.id)
+                                    },
+                                    onToggleLayerOrderGroup = {
+                                        onContextMenuTrackChange(null)
+                                        vm.toggleGroupLayerOrder(tr.id)
+                                    },
+                                    onOpenLayerOrderPicker = {
+                                        onContextMenuTrackChange(null)
+                                        vm.layerOrderPickerGroupId = tr.id
                                     },
                                     onMoveOrder = { delta ->
                                         onContextMenuTrackChange(null)
@@ -408,17 +570,103 @@ fun TrackHeaderColumn(
 }
 
 @Composable
+private fun TrackInlineOpacitySlider(
+    trackId: String,
+    opacity: Float,
+    accentColor: Color,
+    onOpacityChange: (Float) -> Unit,
+    onOpacityCommit: (Float) -> Unit,
+) {
+    val pct = (opacity.coerceIn(0f, 1f) * 100f).roundToInt()
+    val latestOnChange by rememberUpdatedState(onOpacityChange)
+    val latestOnCommit by rememberUpdatedState(onOpacityCommit)
+
+    Row(
+        Modifier.fillMaxWidth().padding(end = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Box(
+            Modifier
+                .weight(1f)
+                .height(14.dp)
+                .pointerInput(trackId) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        down.consume()
+                        val w = size.width.toFloat().coerceAtLeast(1f)
+                        var lastVal = (down.position.x / w).coerceIn(0f, 1f)
+                        latestOnChange(lastVal)
+                        while (true) {
+                            val ev = awaitPointerEvent()
+                            val ch = ev.changes.firstOrNull { it.id == down.id }
+                            if (ch == null || !ch.pressed) {
+                                latestOnCommit(lastVal)
+                                break
+                            }
+                            ch.consume()
+                            lastVal = (ch.position.x / w).coerceIn(0f, 1f)
+                            latestOnChange(lastVal)
+                        }
+                    }
+                }
+                .testTag("track_opacity_slider_$trackId"),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .clip(CircleShape)
+                    .background(Pc.Divider),
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth(opacity.coerceIn(0.02f, 1f))
+                        .fillMaxHeight()
+                        .clip(CircleShape)
+                        .background(accentColor),
+                )
+            }
+            Box(
+                Modifier
+                    .fillMaxWidth(opacity.coerceIn(0f, 1f)),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
+                Box(
+                    Modifier
+                        .size(9.dp)
+                        .clip(CircleShape)
+                        .background(Color.White)
+                        .border(1.dp, accentColor, CircleShape),
+                )
+            }
+        }
+        Text(
+            "$pct%",
+            color = Pc.TextSecondary,
+            fontSize = 8.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
 private fun TrackContextMenu(
     expanded: Boolean,
     track: TimelineTrack,
     existingGroups: List<TimelineTrack>,
     canDelete: Boolean,
     onDismiss: () -> Unit,
+    onDuplicateTrack: () -> Unit,
     onRename: () -> Unit,
     onColorSelect: (TrackColorLabel) -> Unit,
     onCreateGroup: () -> Unit,
     onAssignGroup: (String?) -> Unit,
     onToggleGroupExpanded: () -> Unit,
+    onToggleLayerOrderGroup: () -> Unit,
+    onOpenLayerOrderPicker: () -> Unit,
     onMoveOrder: (Int) -> Unit,
     onToggleVisibilityOrMute: () -> Unit,
     onToggleLock: () -> Unit,
@@ -513,7 +761,52 @@ private fun TrackContextMenu(
             modifier = Modifier.testTag("track_menu_rename_${track.id}"),
         )
 
+        if (track.kind == TrackKind.PAINT) {
+            DropdownMenuItem(
+                text = { Text("Duplicate Track", color = Pc.TextPrimary, fontSize = 13.sp) },
+                leadingIcon = {
+                    Icon(Icons.Rounded.ContentCopy, contentDescription = null, tint = Pc.Accent, modifier = Modifier.size(18.dp))
+                },
+                onClick = onDuplicateTrack,
+                modifier = Modifier.testTag("track_menu_duplicate_${track.id}"),
+            )
+        }
+
         if (track.kind == TrackKind.GROUP) {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (track.isLayerOrderGroup) "Convert to Normal Group" else "Convert to Layer Order",
+                        color = if (track.isLayerOrderGroup) Pc.Accent else Pc.TextPrimary,
+                        fontSize = 13.sp,
+                    )
+                },
+                leadingIcon = {
+                    Icon(
+                        Icons.Rounded.DynamicFeed,
+                        contentDescription = null,
+                        tint = Pc.Accent,
+                        modifier = Modifier.size(18.dp),
+                    )
+                },
+                onClick = onToggleLayerOrderGroup,
+                modifier = Modifier.testTag("track_menu_layer_order_${track.id}"),
+            )
+            if (track.isLayerOrderGroup) {
+                DropdownMenuItem(
+                    text = { Text("Layer Order Picker (3x Tap)...", color = Pc.TextPrimary, fontSize = 13.sp) },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Rounded.Tune,
+                            contentDescription = null,
+                            tint = Pc.Accent,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    },
+                    onClick = onOpenLayerOrderPicker,
+                    modifier = Modifier.testTag("track_menu_layer_order_picker_${track.id}"),
+                )
+            }
             DropdownMenuItem(
                 text = {
                     Text(

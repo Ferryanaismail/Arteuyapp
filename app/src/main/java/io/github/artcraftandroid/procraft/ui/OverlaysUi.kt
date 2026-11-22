@@ -6,6 +6,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -22,14 +24,17 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -593,56 +598,146 @@ fun ReferenceWindowOverlay(
     onPickImage: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val density = LocalDensity.current
     var offset by remember { mutableStateOf(Offset.Zero) }
+    var boxWidthDp by remember { mutableStateOf(190.dp) }
+    var boxHeightDp by remember { mutableStateOf(170.dp) }
+    var showResizeHandle by remember { mutableStateOf(false) }
+    var imgScale by remember { mutableFloatStateOf(1f) }
+    var imgPan by remember { mutableStateOf(Offset.Zero) }
     val bmp = vm.referenceBitmap
     val imgBmp = remember(bmp) { bmp?.asImageBitmap() }
 
-    Column(
+    LaunchedEffect(bmp) {
+        imgScale = 1f
+        imgPan = Offset.Zero
+    }
+
+    Box(
         modifier
             .offset { IntOffset(offset.x.roundToInt(), offset.y.roundToInt()) }
-            .width(190.dp)
+            .width(boxWidthDp)
             .shadow(14.dp, RoundedCornerShape(14.dp))
             .clip(RoundedCornerShape(14.dp))
             .background(Pc.PanelBg)
-            .border(0.8.dp, Pc.Divider, RoundedCornerShape(14.dp))
-            .pointerInput(Unit) {
-                detectDragGestures { change, drag ->
-                    change.consume()
-                    offset += drag
-                }
-            }
+            .border(if (showResizeHandle) 1.4.dp else 0.8.dp, if (showResizeHandle) Pc.Accent else Pc.Divider, RoundedCornerShape(14.dp))
             .testTag("reference_window"),
     ) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .background(Pc.PanelHeader)
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("Reference", color = Pc.TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            Row {
-                IconButton(onClick = onPickImage, modifier = Modifier.size(30.dp)) {
-                    Icon(Icons.Rounded.PhotoLibrary, contentDescription = "Pick Reference Photo", tint = Pc.Accent, modifier = Modifier.size(16.dp))
+        Column(Modifier.fillMaxWidth()) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Pc.PanelHeader)
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, drag ->
+                            change.consume()
+                            offset += drag
+                        }
+                    }
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Reference",
+                    color = Pc.TextPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.pointerInput(Unit) {
+                        detectTapGestures(onDoubleTap = { showResizeHandle = !showResizeHandle })
+                    },
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (imgScale > 1.02f) {
+                        IconButton(
+                            onClick = {
+                                imgScale = 1f
+                                imgPan = Offset.Zero
+                            },
+                            modifier = Modifier.size(28.dp).testTag("reference_reset_zoom"),
+                        ) {
+                            Icon(Icons.Rounded.FitScreen, contentDescription = "Reset Reference Zoom", tint = Pc.Accent, modifier = Modifier.size(15.dp))
+                        }
+                    }
+                    IconButton(onClick = onPickImage, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Rounded.PhotoLibrary, contentDescription = "Pick Reference Photo", tint = Pc.Accent, modifier = Modifier.size(16.dp))
+                    }
+                    IconButton(onClick = { vm.referenceVisible = false }, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Close Reference", tint = Pc.TextSecondary, modifier = Modifier.size(16.dp))
+                    }
                 }
-                IconButton(onClick = { vm.referenceVisible = false }, modifier = Modifier.size(30.dp)) {
-                    Icon(Icons.Rounded.Close, contentDescription = "Close Reference", tint = Pc.TextSecondary, modifier = Modifier.size(16.dp))
+            }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(boxHeightDp)
+                    .background(Pc.GalleryCell)
+                    .clipToBounds()
+                    .pointerInput(imgBmp) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            if (imgBmp != null) {
+                                val nextScale = (imgScale * zoom).coerceIn(1f, 5f)
+                                imgScale = nextScale
+                                imgPan = if (nextScale <= 1.01f) Offset.Zero else imgPan + pan
+                            }
+                        }
+                    }
+                    .pointerInput(imgBmp) {
+                        detectTapGestures(
+                            onDoubleTap = { showResizeHandle = !showResizeHandle },
+                            onTap = { if (imgBmp == null) onPickImage() },
+                        )
+                    }
+                    .testTag("reference_image_viewport"),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (imgBmp != null) {
+                    Image(
+                        imgBmp,
+                        contentDescription = "Reference photo",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = imgScale
+                                scaleY = imgScale
+                                translationX = imgPan.x
+                                translationY = imgPan.y
+                            },
+                    )
+                } else {
+                    Text("Tap to pick photo", color = Pc.TextSecondary, fontSize = 12.sp)
                 }
             }
         }
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(170.dp)
-                .background(Pc.GalleryCell)
-                .clickable(onClick = onPickImage),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (imgBmp != null) {
-                Image(imgBmp, contentDescription = "Reference photo", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-            } else {
-                Text("Tap to pick photo", color = Pc.TextSecondary, fontSize = 12.sp)
+
+        if (showResizeHandle) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(4.dp)
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Pc.Accent.copy(alpha = 0.92f))
+                    .border(1.dp, Color.White.copy(alpha = 0.85f), RoundedCornerShape(8.dp))
+                    .pointerInput(density) {
+                        detectDragGestures { change, drag ->
+                            change.consume()
+                            val dxDp = with(density) { drag.x.toDp() }
+                            val dyDp = with(density) { drag.y.toDp() }
+                            boxWidthDp = (boxWidthDp + dxDp).coerceIn(150.dp, 440.dp)
+                            boxHeightDp = (boxHeightDp + dyDp).coerceIn(130.dp, 460.dp)
+                        }
+                    }
+                    .testTag("reference_resize_handle"),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Rounded.OpenInFull,
+                    contentDescription = "Resize Reference View",
+                    tint = Color.White,
+                    modifier = Modifier.size(16.dp),
+                )
             }
         }
     }

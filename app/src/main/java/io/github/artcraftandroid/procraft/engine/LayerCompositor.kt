@@ -166,12 +166,12 @@ class CanvasTileCache(
         var i = 0
         while (i < layers.size) {
             val layer = layers[i]
-            if (!layer.visible || layer.isMask) {
+            if (!layer.visible || layer.isMask || layer.bitmap.isRecycled) {
                 i++
                 continue
             }
             // Check if the next visible layer is a Layer Mask attached to this base layer
-            val maskAbove = if (i + 1 < layers.size && layers[i + 1].isMask && layers[i + 1].visible) layers[i + 1] else null
+            val maskAbove = if (i + 1 < layers.size && layers[i + 1].isMask && layers[i + 1].visible && !layers[i + 1].bitmap.isRecycled) layers[i + 1] else null
 
             if (maskAbove != null) {
                 scratchCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
@@ -179,7 +179,7 @@ class CanvasTileCache(
                 scratchCanvas.drawBitmap(maskAbove.bitmap, srcRect, dstRect, clipPaint)
                 drawSliceWithRect(c, scratchTile, dstRect, dstRect, layer.opacity, layer.blendMode)
                 i += 2
-            } else if (layer.clippingMask && i > 0) {
+            } else if (layer.clippingMask && i > 0 && !layers[i - 1].bitmap.isRecycled) {
                 val base = layers[i - 1]
                 scratchCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
                 scratchCanvas.drawBitmap(layer.bitmap, srcRect, dstRect, null)
@@ -211,6 +211,7 @@ class CanvasTileCache(
         opacity: Float,
         blendMode: LayerBlendMode,
     ) {
+        if (bmp.isRecycled) return
         val alpha = (opacity.coerceIn(0f, 1f) * 255f).toInt()
         if (alpha <= 0) return
         layerPaint.reset()
@@ -319,11 +320,11 @@ object LayerCompositor {
         var i = 0
         while (i < layers.size) {
             val layer = layers[i]
-            if (!layer.visible || layer.isMask) {
+            if (!layer.visible || layer.isMask || layer.bitmap.isRecycled) {
                 i++
                 continue
             }
-            val maskAbove = if (i + 1 < layers.size && layers[i + 1].isMask && layers[i + 1].visible) layers[i + 1] else null
+            val maskAbove = if (i + 1 < layers.size && layers[i + 1].isMask && layers[i + 1].visible && !layers[i + 1].bitmap.isRecycled) layers[i + 1] else null
             if (maskAbove != null) {
                 val s = scratch ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { scratch = it }
                 val sc = Canvas(s)
@@ -335,7 +336,7 @@ object LayerCompositor {
                 sc.drawBitmap(maskAbove.bitmap, 0f, 0f, cp)
                 drawBitmapWithBlend(canvas, s, layer.opacity, layer.blendMode, paint)
                 i += 2
-            } else if (layer.clippingMask && i > 0) {
+            } else if (layer.clippingMask && i > 0 && !layers[i - 1].bitmap.isRecycled) {
                 val base = layers[i - 1]
                 val s = scratch ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { scratch = it }
                 val sc = Canvas(s)
@@ -367,6 +368,7 @@ object LayerCompositor {
         blendMode: LayerBlendMode,
         paint: Paint,
     ) {
+        if (bmp.isRecycled) return
         val alpha = (opacity.coerceIn(0f, 1f) * 255f).toInt()
         if (alpha <= 0) return
         paint.reset()
@@ -511,6 +513,9 @@ object LayerCompositor {
     }
 
     fun makeThumbnail(bmp: Bitmap, maxDim: Int = 128): Bitmap {
+        if (bmp.isRecycled || bmp.width <= 0 || bmp.height <= 0) {
+            return Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+        }
         val scale = min(maxDim.toFloat() / bmp.width, maxDim.toFloat() / bmp.height).coerceAtMost(1f)
         val tw = max(16, (bmp.width * scale).toInt())
         val th = max(16, (bmp.height * scale).toInt())

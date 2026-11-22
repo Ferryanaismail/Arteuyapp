@@ -304,6 +304,27 @@ fun TrackInspectorDialog(
                     checked = liveTrack.locked,
                     icon = Icons.Rounded.Lock,
                 ) { vm.toggleTrackLock(liveTrack.id) }
+                if (liveTrack.kind == TrackKind.GROUP) {
+                    PcRowDivider()
+                    PcToggleRow(
+                        label = "Group Layer Order",
+                        subtitle = "Hide children until selected via Layer Order frame (3x tap)",
+                        checked = liveTrack.isLayerOrderGroup,
+                        icon = Icons.Rounded.DynamicFeed,
+                    ) { vm.toggleGroupLayerOrder(liveTrack.id) }
+                }
+                PcRowDivider()
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Track Opacity", color = Pc.TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                        Text("${(liveTrack.opacity * 100f).roundToInt()}%", color = Pc.Accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    PcSlider(
+                        value = liveTrack.opacity,
+                        onValueChange = { v -> vm.setTrackOpacity(liveTrack.id, v, persist = false) },
+                        onValueChangeFinished = { vm.persistCurrentArtwork() },
+                    )
+                }
             }
 
             PcSectionCard("Track Order & Grouping") {

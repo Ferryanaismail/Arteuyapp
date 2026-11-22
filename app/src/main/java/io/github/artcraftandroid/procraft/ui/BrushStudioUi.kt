@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.FileOpen
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -57,6 +58,7 @@ fun BrushStudioModal(
     colorRgb: Int,
     onUpdate: (BrushPreset) -> Unit,
     onDeleteCustom: (() -> Unit)? = null,
+    onImportAbr: (() -> Unit)? = null,
     onClose: () -> Unit,
 ) {
     var draft by remember(preset.id) { mutableStateOf(preset) }
@@ -113,17 +115,38 @@ fun BrushStudioModal(
                     )
                 }
 
-                Button(
-                    onClick = {
-                        onUpdate(draft)
-                        onClose()
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Pc.Accent),
-                    shape = RoundedCornerShape(9.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-                    modifier = Modifier.heightIn(min = 38.dp).testTag("brush_studio_done"),
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    Text("Done", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    if (onImportAbr != null) {
+                        TextButton(
+                            onClick = onImportAbr,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            modifier = Modifier.heightIn(min = 48.dp).testTag("brush_studio_import_abr"),
+                        ) {
+                            Icon(
+                                Icons.Rounded.FileOpen,
+                                contentDescription = "Import .abr Brushes",
+                                tint = Pc.Accent,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(".abr", color = Pc.Accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                    Button(
+                        onClick = {
+                            onUpdate(draft)
+                            onClose()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Pc.Accent),
+                        shape = RoundedCornerShape(9.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                        modifier = Modifier.heightIn(min = 40.dp).testTag("brush_studio_done"),
+                    ) {
+                        Text("Done", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
             HorizontalDivider(color = Pc.Divider, thickness = 0.7.dp)
@@ -153,6 +176,7 @@ fun BrushStudioModal(
                             draft = draft,
                             onDraftChange = { draft = it },
                             onDeleteCustom = onDeleteCustom,
+                            onImportAbr = onImportAbr,
                             onClose = onClose,
                             modifier = Modifier.weight(1.05f).fillMaxHeight(),
                         )
@@ -191,6 +215,7 @@ fun BrushStudioModal(
                                 draft = draft,
                                 onDraftChange = { draft = it },
                                 onDeleteCustom = onDeleteCustom,
+                                onImportAbr = onImportAbr,
                                 onClose = onClose,
                                 modifier = Modifier.weight(1f).fillMaxHeight(),
                             )
@@ -392,6 +417,7 @@ private fun StudioControlsPane(
     draft: BrushPreset,
     onDraftChange: (BrushPreset) -> Unit,
     onDeleteCustom: (() -> Unit)?,
+    onImportAbr: (() -> Unit)?,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -487,6 +513,19 @@ private fun StudioControlsPane(
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+                if (draft.settings.tipPath != null) {
+                    PcSectionCard("Imported Tip Texture") {
+                        PcNavRow(
+                            label = "Use Built-in Shape Instead",
+                            trailingText = ".abr Active",
+                            icon = LucideIcons.StudioShape,
+                            showChevron = false,
+                            iconTint = Pc.Accent,
+                        ) {
+                            onDraftChange(draft.copy(settings = draft.settings.copy(tipPath = null)))
                         }
                     }
                 }
@@ -606,6 +645,18 @@ private fun StudioControlsPane(
                     }
                 }
                 PcSectionCard("Reset & Manage") {
+                    if (onImportAbr != null) {
+                        PcNavRow(
+                            label = "Import .abr Brush File...",
+                            trailingText = ".abr",
+                            icon = Icons.Rounded.FileOpen,
+                            showChevron = false,
+                            iconTint = Pc.Accent,
+                        ) {
+                            onImportAbr()
+                        }
+                        PcRowDivider()
+                    }
                     PcNavRow(
                         label = "Reset all settings",
                         icon = PcIcons.TransformReset,

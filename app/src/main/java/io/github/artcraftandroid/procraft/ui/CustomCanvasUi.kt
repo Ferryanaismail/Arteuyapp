@@ -36,7 +36,7 @@ fun CustomCanvasDialog(
     var dpiStr by remember { mutableStateOf((editing?.dpi ?: 300).toString()) }
     var unit by remember { mutableStateOf(editing?.unit ?: CanvasUnit.PX) }
     var bgRgb by remember { mutableIntStateOf(editing?.backgroundRgb ?: 0xFFFFFFFF.toInt()) }
-    var timelapse by remember { mutableStateOf(editing?.timelapseEnabled ?: true) }
+    var timelapse by remember { mutableStateOf(editing?.timelapseEnabled ?: false) }
 
     val wVal = widthStr.toFloatOrNull()?.coerceAtLeast(1f) ?: 2048f
     val hVal = heightStr.toFloatOrNull()?.coerceAtLeast(1f) ?: 2048f

@@ -37,6 +37,15 @@ import io.github.artcraftandroid.procraft.model.Panel
 
 @Composable
 fun AppRoot(vm: CanvasViewModel) {
+    val importAbrPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) vm.importAbrBrushes(uri)
+    }
+    val launchImportAbr = {
+        importAbrPicker.launch(arrayOf("*/*"))
+    }
+
     AnimatedContent(
         targetState = vm.screen,
         transitionSpec = { fadeIn(Motion.fade()) togetherWith fadeOut(Motion.fade()) },
@@ -44,7 +53,7 @@ fun AppRoot(vm: CanvasViewModel) {
     ) { screen ->
         when (screen) {
             Screen.GALLERY -> GalleryScreen(vm)
-            Screen.CANVAS -> CanvasWorkspace(vm)
+            Screen.CANVAS -> CanvasWorkspace(vm, onImportAbr = launchImportAbr)
         }
     }
 
@@ -70,6 +79,7 @@ fun AppRoot(vm: CanvasViewModel) {
             colorRgb = vm.colorRgb,
             onUpdate = { updated -> vm.updateBrushPreset(updated) },
             onDeleteCustom = { vm.deleteCustomBrush(target.id) },
+            onImportAbr = launchImportAbr,
             onClose = { vm.brushStudioTarget = null },
         )
     }
@@ -104,7 +114,10 @@ fun AppRoot(vm: CanvasViewModel) {
 }
 
 @Composable
-private fun CanvasWorkspace(vm: CanvasViewModel) {
+private fun CanvasWorkspace(
+    vm: CanvasViewModel,
+    onImportAbr: () -> Unit,
+) {
     val insertPhotoPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri ->
@@ -146,6 +159,7 @@ private fun CanvasWorkspace(vm: CanvasViewModel) {
             vm.transformNumericOpen -> vm.transformNumericOpen = false
             vm.shortcutsHelpOpen -> vm.shortcutsHelpOpen = false
             vm.inBetweenDialogOpen -> vm.inBetweenDialogOpen = false
+            vm.layerOrderPickerGroupId != null -> vm.layerOrderPickerGroupId = null
             vm.selectionCurveOverlayOpen -> vm.selectionCurveOverlayOpen = false
             vm.quickMenuCenter != null -> vm.quickMenuCenter = null
             vm.panel != Panel.NONE -> vm.panel = Panel.NONE
@@ -167,8 +181,7 @@ private fun CanvasWorkspace(vm: CanvasViewModel) {
     Box(
         Modifier
             .fillMaxSize()
-            .background(Pc.Background)
-            .windowInsetsPadding(WindowInsets.systemBars),
+            .background(Pc.Background),
     ) {
         Column(Modifier.fillMaxSize()) {
             AnimatedVisibility(
@@ -267,6 +280,7 @@ private fun CanvasWorkspace(vm: CanvasViewModel) {
                         BrushLibraryPopover(
                             vm = vm,
                             caretFromEnd = (brushToolCenterFromEnd - 12.dp).coerceAtLeast(18.dp),
+                            onImportAbr = onImportAbr,
                             modifier = Modifier.align(Alignment.TopEnd).padding(end = 12.dp),
                         )
                     }

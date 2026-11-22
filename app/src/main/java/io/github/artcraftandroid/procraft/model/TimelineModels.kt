@@ -35,6 +35,7 @@ data class TimelineClip(
     val audioFilePath: String? = null,
     val audioSampleRate: Int = 22050,
     val waveformPeaks: FloatArray = FloatArray(0),
+    val orderTargetTrackId: String? = null,
 ) {
     val endFrameExclusive: Int get() = startFrame + durationFrames.coerceAtLeast(1)
 
@@ -55,7 +56,8 @@ data class TimelineClip(
             mediaUri == other.mediaUri &&
             audioFilePath == other.audioFilePath &&
             audioSampleRate == other.audioSampleRate &&
-            waveformPeaks.contentEquals(other.waveformPeaks)
+            waveformPeaks.contentEquals(other.waveformPeaks) &&
+            orderTargetTrackId == other.orderTargetTrackId
     }
 
     override fun hashCode(): Int {
@@ -67,6 +69,7 @@ data class TimelineClip(
         result = 31 * result + sourceFrameOffset
         result = 31 * result + (mediaUri?.hashCode() ?: 0)
         result = 31 * result + (audioFilePath?.hashCode() ?: 0)
+        result = 31 * result + (orderTargetTrackId?.hashCode() ?: 0)
         return result
     }
 }
@@ -79,6 +82,8 @@ data class TimelineTrack(
     val visible: Boolean = true,
     val muted: Boolean = false,
     val locked: Boolean = false,
+    val opacity: Float = 1f,
+    val isLayerOrderGroup: Boolean = false,
     val layerId: String? = null,
     val groupId: String? = null,
     val expanded: Boolean = true,

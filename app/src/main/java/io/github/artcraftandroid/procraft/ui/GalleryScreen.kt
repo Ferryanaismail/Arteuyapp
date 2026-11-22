@@ -87,8 +87,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
     BoxWithConstraints(
         Modifier
             .fillMaxSize()
-            .background(Pc.GalleryBackground)
-            .windowInsetsPadding(WindowInsets.systemBars),
+            .background(Pc.GalleryBackground),
     ) {
         val columns = when {
             maxWidth >= 900.dp -> 4

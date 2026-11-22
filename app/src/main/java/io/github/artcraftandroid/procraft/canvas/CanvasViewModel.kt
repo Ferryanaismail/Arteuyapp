@@ -344,6 +344,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var onionSkinCache by mutableStateOf<List<OnionSkinFrame>>(emptyList())
         internal set
     var importingMedia by mutableStateOf(false)
+    var timelineClipHandlesId by mutableStateOf<String?>(null)
+    var layerOrderPickerGroupId by mutableStateOf<String?>(null)
+    var sideBarMoveMode by mutableStateOf(false)
     internal val audioEngine = TimelineAudioEngine()
     internal var animationPlayJob: Job? = null
     private var activeStrokeClipId: String? = null
@@ -503,7 +506,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 val insertAt = (activeLayerIndex + 1).coerceIn(0, layers.size)
                 layers = layers.toMutableList().apply { add(insertAt, newLayer) }
                 activeLayerIndex = insertAt
+                if (timelineTracks.isNotEmpty()) syncPaintTracksWithLayers()
+                rebuildTimelineRenderState()
                 recomposite()
+                refreshLayerThumbnail(insertAt)
                 persistCurrentArtwork()
                 showNotice("Inserted image on Layer ${insertAt + 1}")
             }
@@ -535,6 +541,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 fps = loadedTimeline.fps,
                 totalFrames = loadedTimeline.totalFrames,
                 audioScrubEnabled = loadedTimeline.audioScrubEnabled,
+                timelineSnapping = loadedTimeline.timelineSnapping,
             )
             refreshTimelineClipThumbnails()
         } else {
@@ -883,6 +890,44 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         saveBrushSetsAsync()
     }
 
+    fun importAbrBrushes(uri: Uri) {
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            val cr = app.contentResolver
+            var displayName = "Imported ABR"
+            cr.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) displayName = c.getString(0) ?: displayName
+            }
+            val baseName = displayName.substringBeforeLast('.').ifBlank { "Imported ABR" }
+            val bytes = cr.openInputStream(uri)?.use { it.readBytes() }
+            if (bytes == null || bytes.isEmpty()) {
+                withContext(Dispatchers.Main) { showNotice("Failed to read .abr file") }
+                return@launch
+            }
+            val setId = UUID.randomUUID().toString()
+            val parsed = AbrBrushParser.parseAbr(
+                bytes = bytes,
+                setId = setId,
+                tipsOutputDir = repo.brushTipsDir(),
+                fallbackBaseName = baseName,
+            )
+            withContext(Dispatchers.Main) {
+                if (parsed.isEmpty()) {
+                    showNotice("No compatible brushes found in .abr")
+                } else {
+                    val newSet = BrushSet(id = setId, name = baseName.take(28), brushes = parsed, isCustom = true)
+                    brushSets = listOf(newSet) + brushSets
+                    selectBrush(parsed.first())
+                    if (brushStudioTarget != null) {
+                        brushStudioTarget = parsed.first()
+                    }
+                    saveBrushSetsAsync()
+                    showNotice("Imported ${parsed.size} brush(es) from $baseName")
+                }
+            }
+        }
+    }
+
     private fun saveBrushSetsAsync() {
         val snapshot = brushSets
         viewModelScope.launch(Dispatchers.IO) { repo.saveBrushSets(snapshot) }
@@ -1186,9 +1231,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun pushUndoSnapshot() {
+        val art = currentArtwork
         pushHistoryEntry(
             FullSnapshot(
-                layers = layers.map { LayerSnapshot(it, it.bitmap.copy(Bitmap.Config.ARGB_8888, false)) },
+                layers = layers.map { l ->
+                    val copy = if (!l.bitmap.isRecycled) {
+                        l.bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                    } else {
+                        Bitmap.createBitmap((art?.width ?: 512).coerceAtLeast(1), (art?.height ?: 512).coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+                    }
+                    LayerSnapshot(l, copy)
+                },
                 activeLayerIndex = activeLayerIndex,
                 backgroundRgb = backgroundRgb,
                 backgroundVisible = backgroundVisible,
@@ -1197,10 +1250,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun pushBitmapBackupUndo(layerIdx: Int, beforeBmp: Bitmap) {
+        val art = currentArtwork
         pushHistoryEntry(
             FullSnapshot(
                 layers = layers.mapIndexed { idx, l ->
-                    val bmp = if (idx == layerIdx) beforeBmp else l.bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                    val bmp = when {
+                        idx == layerIdx && !beforeBmp.isRecycled -> beforeBmp
+                        !l.bitmap.isRecycled -> l.bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                        else -> Bitmap.createBitmap((art?.width ?: 512).coerceAtLeast(1), (art?.height ?: 512).coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+                    }
                     LayerSnapshot(l, bmp)
                 },
                 activeLayerIndex = activeLayerIndex,
@@ -1212,10 +1270,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun undo() {
         val prev = undoStack.removeLastOrNull() ?: return
+        val art = currentArtwork
         when (prev) {
             is FullSnapshot -> {
                 val curr = FullSnapshot(
-                    layers = layers.map { LayerSnapshot(it, it.bitmap.copy(Bitmap.Config.ARGB_8888, false)) },
+                    layers = layers.map { l ->
+                        val copy = if (!l.bitmap.isRecycled) {
+                            l.bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                        } else {
+                            Bitmap.createBitmap((art?.width ?: 512).coerceAtLeast(1), (art?.height ?: 512).coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+                        }
+                        LayerSnapshot(l, copy)
+                    },
                     activeLayerIndex = activeLayerIndex,
                     backgroundRgb = backgroundRgb,
                     backgroundVisible = backgroundVisible,
@@ -1233,10 +1299,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun redo() {
         val next = redoStack.removeLastOrNull() ?: return
+        val art = currentArtwork
         when (next) {
             is FullSnapshot -> {
                 val curr = FullSnapshot(
-                    layers = layers.map { LayerSnapshot(it, it.bitmap.copy(Bitmap.Config.ARGB_8888, false)) },
+                    layers = layers.map { l ->
+                        val copy = if (!l.bitmap.isRecycled) {
+                            l.bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                        } else {
+                            Bitmap.createBitmap((art?.width ?: 512).coerceAtLeast(1), (art?.height ?: 512).coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+                        }
+                        LayerSnapshot(l, copy)
+                    },
                     activeLayerIndex = activeLayerIndex,
                     backgroundRgb = backgroundRgb,
                     backgroundVisible = backgroundVisible,
@@ -1399,7 +1473,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setLayerOpacity(index: Int, opacity: Float) {
         val target = layers.getOrNull(index) ?: return
-        layers = layers.toMutableList().apply { set(index, target.copy(opacity = opacity.coerceIn(0f, 1f))) }
+        val clamped = opacity.coerceIn(0f, 1f)
+        layers = layers.toMutableList().apply { set(index, target.copy(opacity = clamped)) }
+        if (timelineTracks.isNotEmpty()) {
+            timelineTracks = timelineTracks.map { tr ->
+                if (tr.kind == TrackKind.PAINT && tr.layerId == target.id) tr.copy(opacity = clamped) else tr
+            }
+        }
+        rebuildTimelineRenderState()
         recomposite()
     }
 
@@ -1490,24 +1571,40 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         heldLayerIds = if (layerId in heldLayerIds) heldLayerIds - layerId else heldLayerIds + layerId
     }
 
+    private fun recycleUnreferencedBitmaps(candidates: List<Bitmap>) {
+        candidates.forEach { bmp ->
+            if (!bmp.isRecycled &&
+                layers.none { it.bitmap === bmp } &&
+                !isBitmapOwnedByTimeline(bmp) &&
+                renderLayersCache.none { it.bitmap === bmp }
+            ) {
+                bmp.recycle()
+            }
+        }
+    }
+
     fun mergeVisibleLayers() {
         val art = currentArtwork ?: return
-        val visibleCount = layers.count { it.visible }
-        if (visibleCount <= 1) {
+        val visibleLayers = layers.filter { it.visible }
+        if (visibleLayers.size <= 1) {
             showNotice("Need 2+ visible layers to merge")
             return
         }
         pushUndoSnapshot()
-        val mergedBmp = LayerCompositor.composite(art.width, art.height, layers, 0, false, AnimationState())
+        val oldBitmaps = visibleLayers.map { it.bitmap }
+        val safeSource = layers.filter { !it.bitmap.isRecycled }
+        val mergedBmp = LayerCompositor.composite(art.width, art.height, safeSource, 0, false, AnimationState())
         val hidden = layers.filter { !it.visible }.toMutableList()
-        layers.filter { it.visible }.forEach { it.bitmap.recycle() }
         val mergedLayer = LayerState(UUID.randomUUID().toString(), "Merged Visible", bitmap = mergedBmp)
         hidden.add(mergedLayer)
         layers = hidden
         activeLayerIndex = layers.lastIndex.coerceAtLeast(0)
         heldLayerIds = emptySet()
+        if (timelineTracks.isNotEmpty()) syncPaintTracksWithLayers()
+        rebuildTimelineRenderState()
         recomposite()
         refreshLayerThumbnails()
+        recycleUnreferencedBitmaps(oldBitmaps)
         persistCurrentArtwork()
         showNotice("Merged visible layers")
     }
@@ -1515,9 +1612,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun mergeHeldLayers() {
         if (heldLayerIds.size < 2) return
         val art = currentArtwork ?: return
-        pushUndoSnapshot()
         val toMerge = layers.filter { it.id in heldLayerIds }
-        val mergedBmp = LayerCompositor.composite(art.width, art.height, toMerge, 0, false, AnimationState())
+        if (toMerge.size < 2) return
+        pushUndoSnapshot()
+        val oldBitmaps = toMerge.map { it.bitmap }
+        val safeToMerge = toMerge.filter { !it.bitmap.isRecycled }
+        val mergedBmp = LayerCompositor.composite(art.width, art.height, safeToMerge, 0, false, AnimationState())
         val remaining = mutableListOf<LayerState>()
         var inserted = false
         for (l in layers) {
@@ -1526,7 +1626,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     remaining.add(LayerState(UUID.randomUUID().toString(), "${toMerge.first().name} Merged", bitmap = mergedBmp))
                     inserted = true
                 }
-                l.bitmap.recycle()
             } else {
                 remaining.add(l)
             }
@@ -1534,8 +1633,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         layers = remaining
         activeLayerIndex = activeLayerIndex.coerceIn(0, layers.lastIndex.coerceAtLeast(0))
         heldLayerIds = emptySet()
+        if (timelineTracks.isNotEmpty()) syncPaintTracksWithLayers()
+        rebuildTimelineRenderState()
         recomposite()
         refreshLayerThumbnails()
+        recycleUnreferencedBitmaps(oldBitmaps)
         persistCurrentArtwork()
         showNotice("Merged selected layers")
     }
@@ -1591,16 +1693,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val top = layers[index]
         val bottom = layers[index - 1]
         if (top.locked || bottom.locked) { showNotice("Locked layer cannot merge"); return }
+        if (top.bitmap.isRecycled || bottom.bitmap.isRecycled) return
         pushUndoSnapshot()
         val merged = LayerCompositor.composite(bottom.bitmap.width, bottom.bitmap.height, listOf(bottom, top), 0, false, AnimationState())
         bottom.bitmap.eraseColor(Color.TRANSPARENT)
         Canvas(bottom.bitmap).drawBitmap(merged, 0f, 0f, null)
         merged.recycle()
-        top.bitmap.recycle()
         layers = layers.toMutableList().apply { removeAt(index) }
         activeLayerIndex = index - 1
+        if (timelineTracks.isNotEmpty()) syncPaintTracksWithLayers()
+        rebuildTimelineRenderState()
         recomposite()
         refreshLayerThumbnail(activeLayerIndex)
+        recycleUnreferencedBitmaps(listOf(top.bitmap))
         persistCurrentArtwork()
     }
 
@@ -2021,12 +2126,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val nw = (crop.right - crop.left).coerceIn(64, 4096)
         val nh = (crop.bottom - crop.top).coerceIn(64, 4096)
         clearHistory()
+        val oldBitmaps = layers.map { it.bitmap }
         layers = layers.map { l ->
             val out = Bitmap.createBitmap(nw, nh, Bitmap.Config.ARGB_8888)
-            Canvas(out).drawBitmap(l.bitmap, -crop.left.toFloat(), -crop.top.toFloat(), null)
-            l.bitmap.recycle()
+            if (!l.bitmap.isRecycled) {
+                Canvas(out).drawBitmap(l.bitmap, -crop.left.toFloat(), -crop.top.toFloat(), null)
+            }
             l.copy(bitmap = out)
         }
+        if (timelineTracks.isNotEmpty()) syncPaintTracksWithLayers()
+        rebuildTimelineRenderState()
+        recycleUnreferencedBitmaps(oldBitmaps)
         currentArtwork = art.copy(width = nw, height = nh, updatedAtMs = System.currentTimeMillis())
         selectionMask = SelectionMask(nw, nh)
         tileCache?.recycle()
@@ -2092,6 +2202,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         layers = layers.toMutableList().apply { add(insertAt, layer) }
         activeLayerIndex = insertAt
         textEditing = false
+        if (timelineTracks.isNotEmpty()) syncPaintTracksWithLayers()
+        rebuildTimelineRenderState()
         recomposite()
         refreshLayerThumbnail(insertAt)
         persistCurrentArtwork()
@@ -2185,7 +2297,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun exportAnimatedSequence(format: String, fps: Int, transparentBg: Boolean, pingPong: Boolean) {
         val art = currentArtwork ?: return
         val bgRgb = backgroundRgb
-        val showBg = backgroundVisible && !transparentBg
+        val isMp4 = format.equals("MP4", ignoreCase = true)
+        val showBg = backgroundVisible && (!transparentBg || isMp4)
         if (timelineTracks.isNotEmpty() && animationState.totalFrames > 0) {
             val total = animationState.totalFrames.coerceIn(1, 300)
             val snapshots = ArrayList<Bitmap>(total)
@@ -2206,6 +2319,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     snapshots + snapshots.subList(1, snapshots.size - 1).reversed()
                 } else snapshots
                 when (format.uppercase()) {
+                    "MP4" -> {
+                        val ok = repo.exportMp4AndShare(art.title, ordered, fps = fps)
+                        if (!ok) {
+                            withContext(Dispatchers.Main) { showNotice("MP4 encoding failed") }
+                        }
+                    }
                     "GIF" -> repo.exportAnimatedGifAndShare(art.title, ordered, fps = fps, transparentBg = transparentBg)
                     "SHEET" -> repo.exportAndShare(art.title, "SHEET", snapshots)
                     else -> repo.exportAndShare(art.title, "PDF", snapshots)
@@ -2227,6 +2346,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 frames + frames.subList(1, frames.size - 1).reversed()
             } else frames
             when (format.uppercase()) {
+                "MP4" -> {
+                    val ok = repo.exportMp4AndShare(art.title, orderedFrames, fps = fps)
+                    if (!ok) {
+                        withContext(Dispatchers.Main) { showNotice("MP4 encoding failed") }
+                    }
+                }
                 "GIF" -> repo.exportAnimatedGifAndShare(art.title, orderedFrames, fps = fps, transparentBg = transparentBg)
                 "SHEET" -> repo.exportAndShare(art.title, "SHEET", frames)
                 else -> repo.exportAndShare(art.title, "PDF", frames)
@@ -2327,6 +2452,25 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             if (bmps.isNotEmpty()) {
                 repo.exportAnimatedGifAndShare("${art.title}_timelapse", bmps, fps = fps, transparentBg = false, maxDim = 512)
                 bmps.forEach { it.recycle() }
+            }
+        }
+    }
+
+    fun exportTimeLapseMp4(fps: Int = 12) {
+        val art = currentArtwork ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val files = repo.listTimeLapseFrames(art.id)
+            if (files.isEmpty()) {
+                withContext(Dispatchers.Main) { showNotice("No time-lapse frames yet") }
+                return@launch
+            }
+            val bmps = files.mapNotNull { android.graphics.BitmapFactory.decodeFile(it.absolutePath) }
+            if (bmps.isNotEmpty()) {
+                val ok = repo.exportMp4AndShare("${art.title}_timelapse", bmps, fps = fps, maxDim = 1080)
+                bmps.forEach { it.recycle() }
+                if (!ok) {
+                    withContext(Dispatchers.Main) { showNotice("MP4 encoding failed") }
+                }
             }
         }
     }
@@ -2454,7 +2598,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val tlBmp = if (captureTimeLapse && updatedMeta.timelapseEnabled && hasPrivate) {
             LayerCompositor.compositeForTimelapse(art.width, art.height, effective, backgroundRgb, backgroundVisible, animationState)
         } else null
-        val layerSnapshots = layers.map { l -> l.copy(bitmap = l.bitmap.copy(Bitmap.Config.ARGB_8888, false)) }
+        val layerSnapshots = layers.mapNotNull { l ->
+            if (l.bitmap.isRecycled) null else l.copy(bitmap = l.bitmap.copy(Bitmap.Config.ARGB_8888, false))
+        }
         val timelineSnapshot = timelineTracks.map { tr ->
             tr.copy(
                 clips = tr.clips.map { cl ->
@@ -2496,6 +2642,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         animationPlayJob?.cancel()
         audioEngine.stopPlayback()
         animationState = AnimationState()
+        timelineClipHandlesId = null
+        layerOrderPickerGroupId = null
+        sideBarMoveMode = false
         panel = Panel.NONE
         selecting = false
         transforming = false
