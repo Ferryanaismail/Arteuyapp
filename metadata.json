@@ -1,0 +1,6 @@
+{
+  "name": "ProCraft",
+  "description": "Digital painting studio for Android with multi-layer compositing, customizable brush engine, color harmony, adjustments, selection, transform, drawing guides, and animation assist.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
